@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use crate::cellref::{Range, cell_name, col_name};
 use crate::diff::{Change, Kind, Listing, SheetComparison, Status};
-use crate::model::{Sheet, Value, Workbook};
+use crate::model::{Cell, Sheet, Value, Workbook};
 
 /// Rows with a change, plus this many neighbours, stay visible in
 /// "changes only" view.
@@ -51,40 +51,6 @@ struct Slot {
     status: Status,
 }
 
-/// Rebuilds an axis's slots in display order from the alignment runs, the
-/// moves, and the one-sided rows or columns listed as changes.
-fn slots(runs: &[[u32; 3]], moves: &[[u32; 3]], lone_base: &[u32], lone_other: &[u32]) -> Vec<Slot> {
-    let mut pairs: Vec<(u32, u32)> = runs.iter().flat_map(|&[b, o, n]| (0..n).map(move |k| (b + k, o + k))).collect();
-    pairs.sort_unstable();
-    let mut moved: Vec<(u32, u32)> = moves.iter().flat_map(|&[b, o, n]| (0..n).map(move |k| (b + k, o + k))).collect();
-    moved.sort_unstable_by_key(|m| m.1);
-    let (mut lb, mut lo) = (lone_base.to_vec(), lone_other.to_vec());
-    lb.sort_unstable();
-    lo.sort_unstable();
-    let (mut ib, mut io, mut im) = (0, 0, 0);
-    let mut out = Vec::new();
-    let flush = |b_limit: u32, o_limit: u32, out: &mut Vec<Slot>, ib: &mut usize, io: &mut usize, im: &mut usize| {
-        while *ib < lb.len() && lb[*ib] < b_limit {
-            out.push(Slot { base: Some(lb[*ib]), other: None, status: Status::OnlyBase });
-            *ib += 1;
-        }
-        while *im < moved.len() && moved[*im].1 < o_limit {
-            out.push(Slot { base: Some(moved[*im].0), other: Some(moved[*im].1), status: Status::Moved });
-            *im += 1;
-        }
-        while *io < lo.len() && lo[*io] < o_limit {
-            out.push(Slot { base: None, other: Some(lo[*io]), status: Status::OnlyOther });
-            *io += 1;
-        }
-    };
-    for &(b, o) in &pairs {
-        flush(b, o, &mut out, &mut ib, &mut io, &mut im);
-        out.push(Slot { base: Some(b), other: Some(o), status: Status::Same });
-    }
-    flush(u32::MAX, u32::MAX, &mut out, &mut ib, &mut io, &mut im);
-    out
-}
-
 /// A cell's text as shown: numbers with digit grouping when they are whole,
 /// booleans and errors as Excel spells them.
 fn shown(v: &Value) -> String {
@@ -118,18 +84,85 @@ fn cell_value(sheet: &Sheet, row: u32, col: u32) -> Option<&crate::model::Cell> 
     cells.binary_search_by_key(&col, |c| c.col).ok().map(|i| &cells[i])
 }
 
-/// Every cell a change touches on one side: its cell, or each cell of its range.
+/// Rebuilds an axis's slots in display order: the paired numbers from the
+/// alignment runs, moved items at their place on the other side, and the
+/// one-sided numbers, each between the pairs that surround it.
+fn slots(runs: &[[u32; 3]], moves: &[[u32; 3]], lone_base: &[u32], lone_other: &[u32]) -> Vec<Slot> {
+    let mut pairs: Vec<(u32, u32)> = runs.iter().flat_map(|&[b, o, n]| (0..n).map(move |k| (b + k, o + k))).collect();
+    pairs.sort_unstable();
+    // Moves and other-side inserts both sit at their other-side position.
+    let mut other_side: Vec<Slot> = moves
+        .iter()
+        .flat_map(|&[b, o, n]| {
+            (0..n).map(move |k| Slot { base: Some(b + k), other: Some(o + k), status: Status::Moved })
+        })
+        .chain(lone_other.iter().map(|&o| Slot { base: None, other: Some(o), status: Status::OnlyOther }))
+        .collect();
+    other_side.sort_unstable_by_key(|s| s.other);
+    let mut lb = lone_base.to_vec();
+    lb.sort_unstable();
+    let (mut ib, mut io) = (0, 0);
+    let mut out = Vec::new();
+    let flush = |b_limit: u32, o_limit: u32, out: &mut Vec<Slot>, ib: &mut usize, io: &mut usize| {
+        while *ib < lb.len() && lb[*ib] < b_limit {
+            out.push(Slot { base: Some(lb[*ib]), other: None, status: Status::OnlyBase });
+            *ib += 1;
+        }
+        while *io < other_side.len() && other_side[*io].other.is_some_and(|o| o < o_limit) {
+            out.push(other_side[*io]);
+            *io += 1;
+        }
+    };
+    for &(b, o) in &pairs {
+        flush(b, o, &mut out, &mut ib, &mut io);
+        out.push(Slot { base: Some(b), other: Some(o), status: Status::Same });
+    }
+    flush(u32::MAX, u32::MAX, &mut out, &mut ib, &mut io);
+    out
+}
+
+/// Every cell a change touches on one side: its cell, or each cell of its
+/// ranges (`A1:B2 D5` too), up to a bound; a larger object marks no cells
+/// and is listed in the details panel instead.
 fn touched(loc: Option<&crate::diff::Location>) -> Vec<(u32, u32)> {
+    const MAX_MARKED: usize = 10_000;
     let Some(l) = loc else { return Vec::new() };
-    if let Some(r) = l.range.as_deref().and_then(Range::parse) {
-        let area = (r.last_row - r.first_row + 1) as usize * (r.last_col - r.first_col + 1) as usize;
-        if area <= 10_000 {
-            return (r.first_row..=r.last_row)
-                .flat_map(|row| (r.first_col..=r.last_col).map(move |c| (row, c)))
+    if let Some(ranges) = &l.range {
+        let parsed: Vec<Range> = ranges.split_whitespace().filter_map(Range::parse).collect();
+        let area: usize = parsed
+            .iter()
+            .map(|r| (r.last_row - r.first_row + 1) as usize * (r.last_col - r.first_col + 1) as usize)
+            .sum();
+        if !parsed.is_empty() {
+            if area > MAX_MARKED {
+                return Vec::new();
+            }
+            return parsed
+                .iter()
+                .flat_map(|r| {
+                    (r.first_row..=r.last_row).flat_map(move |row| (r.first_col..=r.last_col).map(move |c| (row, c)))
+                })
                 .collect();
         }
     }
     l.cell.as_deref().and_then(crate::cellref::parse_cell).into_iter().collect()
+}
+
+/// The row (or column) numbers a row or column change covers on one side:
+/// its number, or each number of a folded range such as `3:5` or `B:D`.
+fn lines(loc: Option<&crate::diff::Location>, kind: Kind) -> Vec<u32> {
+    let Some(l) = loc else { return Vec::new() };
+    let one = |t: &str| if kind == Kind::Row { t.parse().ok() } else { crate::cellref::parse_col(t) };
+    if let Some((a, b)) = l.range.as_deref().and_then(|r| r.split_once(':'))
+        && let (Some(a), Some(b)) = (one(a), one(b))
+    {
+        return (a.min(b)..=a.max(b)).take(20_000).collect();
+    }
+    if kind == Kind::Row {
+        l.row.into_iter().collect()
+    } else {
+        l.column.as_deref().and_then(crate::cellref::parse_col).into_iter().collect()
+    }
 }
 
 fn kind_class(k: Kind) -> &'static str {
@@ -139,6 +172,30 @@ fn kind_class(k: Kind) -> &'static str {
         Kind::Format => "m",
         _ => "o",
     }
+}
+
+fn join_ids(ids: &[usize]) -> String {
+    ids.iter().map(usize::to_string).collect::<Vec<_>>().join(" ")
+}
+
+/// Content rows and columns of a sheet: those with a value or formula.
+fn content_lines(sheet: &Sheet) -> (Vec<u32>, Vec<u32>) {
+    let rows: Vec<u32> = sheet.rows.iter().filter(|r| r.cells.iter().any(Cell::has_content)).map(|r| r.index).collect();
+    let mut cols: Vec<u32> = sheet.cells().filter(|(_, c)| c.has_content()).map(|(_, c)| c.col).collect();
+    cols.sort_unstable();
+    cols.dedup();
+    (rows, cols)
+}
+
+/// Numbers in `content` that no pair or move of the alignment covers.
+fn unpaired(content: &[u32], runs: &[[u32; 3]], moves: &[[u32; 3]], base_side: bool) -> Vec<u32> {
+    let covered = |n: u32| {
+        runs.iter().chain(moves).any(|&[b, o, len]| {
+            let start = if base_side { b } else { o };
+            (start..start + len).contains(&n)
+        })
+    };
+    content.iter().copied().filter(|&n| !covered(n)).collect()
 }
 
 /// One sheet pair's two grids and its per-cell change index.
@@ -153,57 +210,75 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
         return;
     };
     let (Some(base), Some(other)) = (base, other) else { return };
-    let lone = |kind: Kind, status: Status| -> Vec<u32> {
-        s.changes
-            .iter()
-            .filter(|c| c.kind == kind && c.status == status)
-            .filter_map(|c| {
-                let l = if status == Status::OnlyBase { c.base.as_ref() } else { c.other.as_ref() }?;
-                if kind == Kind::Row { l.row } else { l.column.as_deref().and_then(crate::cellref::parse_col) }
-            })
-            .collect()
-    };
-    let rows = slots(&al.rows, &al.row_moves, &lone(Kind::Row, Status::OnlyBase), &lone(Kind::Row, Status::OnlyOther));
-    let cols =
-        slots(&al.cols, &al.col_moves, &lone(Kind::Column, Status::OnlyBase), &lone(Kind::Column, Status::OnlyOther));
-    // Only rows and columns with content on either side are shown.
-    let has_row =
-        |sheet: &Sheet, r: Option<u32>| r.is_some_and(|r| sheet.rows.binary_search_by_key(&r, |x| x.index).is_ok());
-    let rows: Vec<Slot> = rows.into_iter().filter(|s| has_row(base, s.base) || has_row(other, s.other)).collect();
+    // The grids follow the alignment, not the listed changes, so filtering
+    // the changes (--kind) never drops inserted rows or misaligns the sides.
+    let ((b_rows, b_cols), (o_rows, o_cols)) = (content_lines(base), content_lines(other));
+    let rows = slots(
+        &al.rows,
+        &al.row_moves,
+        &unpaired(&b_rows, &al.rows, &al.row_moves, true),
+        &unpaired(&o_rows, &al.rows, &al.row_moves, false),
+    );
+    let cols = slots(
+        &al.cols,
+        &al.col_moves,
+        &unpaired(&b_cols, &al.cols, &al.col_moves, true),
+        &unpaired(&o_cols, &al.cols, &al.col_moves, false),
+    );
+    // Only rows and columns with content on either side are drawn: a stray
+    // far-away cell must not widen every row to the whole grid.
+    let in_list = |list: &[u32], n: Option<u32>| n.is_some_and(|n| list.binary_search(&n).is_ok());
+    let rows: Vec<Slot> = rows.into_iter().filter(|r| in_list(&b_rows, r.base) || in_list(&o_rows, r.other)).collect();
+    let cols: Vec<Slot> = cols.into_iter().filter(|c| in_list(&b_cols, c.base) || in_list(&o_cols, c.other)).collect();
 
-    // Which change ids touch each cell, by side.
-    let mut on_base: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    let mut on_other: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
-    let mut row_marks: HashMap<(bool, u32), Vec<usize>> = HashMap::new();
+    // Which change ids touch each cell, row, and column, by side.
+    let mut on_cell: [HashMap<(u32, u32), Vec<usize>>; 2] = [HashMap::new(), HashMap::new()];
+    let mut on_row: [HashMap<u32, Vec<usize>>; 2] = [HashMap::new(), HashMap::new()];
+    let mut on_col: [HashMap<u32, Vec<usize>>; 2] = [HashMap::new(), HashMap::new()];
     for (i, c) in s.changes.iter().enumerate() {
-        match c.kind {
-            Kind::Row => {
-                if let Some(r) = c.base.as_ref().and_then(|l| l.row) {
-                    row_marks.entry((true, r)).or_default().push(i);
+        for (side, loc) in [(0, c.base.as_ref()), (1, c.other.as_ref())] {
+            match c.kind {
+                Kind::Row => {
+                    for n in lines(loc, Kind::Row) {
+                        on_row[side].entry(n).or_default().push(i);
+                    }
                 }
-                if let Some(r) = c.other.as_ref().and_then(|l| l.row) {
-                    row_marks.entry((false, r)).or_default().push(i);
+                Kind::Column => {
+                    for n in lines(loc, Kind::Column) {
+                        on_col[side].entry(n).or_default().push(i);
+                    }
                 }
-            }
-            Kind::Column => {}
-            _ => {
-                for p in touched(c.base.as_ref()) {
-                    on_base.entry(p).or_default().push(i);
-                }
-                for p in touched(c.other.as_ref()) {
-                    on_other.entry(p).or_default().push(i);
+                _ => {
+                    for p in touched(loc) {
+                        on_cell[side].entry(p).or_default().push(i);
+                    }
                 }
             }
         }
     }
-    let base_rows: std::collections::HashSet<u32> = on_base.keys().map(|k| k.0).collect();
-    let other_rows: std::collections::HashSet<u32> = on_other.keys().map(|k| k.0).collect();
+    let marked_rows: [std::collections::HashSet<u32>; 2] =
+        [0, 1].map(|side| on_cell[side].keys().map(|k| k.0).collect());
+    // Content in an inserted, deleted, or moved column is a change for every
+    // row that has some.
+    let changed_cols: [std::collections::HashSet<u32>; 2] = [0, 1].map(|side| {
+        cols.iter()
+            .filter(|c| c.status != Status::Same)
+            .filter_map(|c| if side == 0 { c.base } else { c.other })
+            .chain(on_col[side].keys().copied())
+            .collect()
+    });
+    let touches_changed_col = |sheet: &Sheet, side: usize, r: Option<u32>| {
+        r.and_then(|r| cell_row(sheet, r))
+            .is_some_and(|cells| cells.iter().any(|c| c.has_content() && changed_cols[side].contains(&c.col)))
+    };
     let row_changed: Vec<bool> = rows
         .iter()
         .map(|r| {
             r.status != Status::Same
-                || r.base.is_some_and(|b| row_marks.contains_key(&(true, b)) || base_rows.contains(&b))
-                || r.other.is_some_and(|o| row_marks.contains_key(&(false, o)) || other_rows.contains(&o))
+                || r.base.is_some_and(|b| on_row[0].contains_key(&b) || marked_rows[0].contains(&b))
+                || r.other.is_some_and(|o| on_row[1].contains_key(&o) || marked_rows[1].contains(&o))
+                || touches_changed_col(base, 0, r.base)
+                || touches_changed_col(other, 1, r.other)
         })
         .collect();
     let near: Vec<bool> = (0..rows.len())
@@ -213,35 +288,72 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
         })
         .collect();
     let trimmed = rows.len() * cols.len().max(1) > MAX_GRID_CELLS;
+    let drawn = if trimmed { near.iter().filter(|n| **n).count() } else { rows.len() };
+    let _ = write!(out, "<section class=\"sheet\" data-s=\"{index}\">");
+    if drawn * cols.len().max(1) > MAX_GRID_CELLS {
+        let _ = write!(
+            out,
+            "<p class=\"warn\" data-nogrid=\"1\">This sheet's changes span too much of it to draw ({} rows × {} columns); every change is listed below.</p></section>",
+            drawn,
+            cols.len()
+        );
+        return;
+    }
+    if trimmed {
+        out.push_str("<p class=\"warn\">This sheet is large; only changed rows and their neighbours are shown.</p>");
+    }
     let col_class = |c: &Slot| match c.status {
         Status::OnlyBase => " cb",
         Status::OnlyOther => " co",
         Status::Moved => " cm",
         _ => "",
     };
-
-    let _ = write!(out, "<section class=\"sheet\" data-s=\"{index}\">");
-    if trimmed {
-        let _ =
-            write!(out, "<p class=\"warn\">This sheet is large; only changed rows and their neighbours are shown.</p>");
-    }
+    // One width per column slot, shared by both grids so they stay aligned
+    // when scrolled together: from the longest text on either side.
+    let widths: Vec<u32> = cols
+        .iter()
+        .map(|c| {
+            let longest = rows
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !trimmed || near[*i])
+                .flat_map(|(_, r)| {
+                    [(base, r.base, c.base), (other, r.other, c.other)].into_iter().filter_map(|(sheet, row, col)| {
+                        cell_value(sheet, row?, col?).map(|cell| shown(&cell.value).chars().count())
+                    })
+                })
+                .max()
+                .unwrap_or(0);
+            (u32::try_from(longest).unwrap_or(u32::MAX).saturating_mul(7).saturating_add(14)).clamp(56, 260)
+        })
+        .collect();
+    let total: u32 = 48 + widths.iter().sum::<u32>();
     out.push_str("<div class=\"panes\">");
-    for (side, sheet) in [(true, base), (false, other)] {
+    for (side, sheet) in [(0usize, base), (1usize, other)] {
         let _ = write!(
             out,
-            "<div class=\"pane {}\"><table class=\"grid\"><thead><tr><th class=\"rn\"></th>",
-            if side { "b" } else { "o" }
+            "<div class=\"pane {}\"><table class=\"grid\" style=\"width:{total}px\"><colgroup><col style=\"width:48px\">",
+            if side == 0 { "b" } else { "o" }
         );
+        for w in &widths {
+            let _ = write!(out, "<col style=\"width:{w}px\">");
+        }
+        out.push_str("</colgroup><thead><tr><th class=\"rn\"></th>");
         for c in &cols {
-            let n = if side { c.base } else { c.other };
-            let _ = write!(out, "<th class=\"ch{}\">{}</th>", col_class(c), n.map(col_name).unwrap_or_default());
+            let n = if side == 0 { c.base } else { c.other };
+            let ids = n.and_then(|n| on_col[side].get(&n));
+            let _ = write!(out, "<th class=\"ch{}\"", col_class(c));
+            if let Some(ids) = ids {
+                let _ = write!(out, " data-c=\"{}\"", join_ids(ids));
+            }
+            let _ = write!(out, ">{}</th>", n.map(col_name).unwrap_or_default());
         }
         out.push_str("</tr></thead><tbody>");
         for (i, r) in rows.iter().enumerate() {
             if trimmed && !near[i] {
                 continue;
             }
-            let n = if side { r.base } else { r.other };
+            let n = if side == 0 { r.base } else { r.other };
             let status = match r.status {
                 Status::OnlyBase => " rb",
                 Status::OnlyOther => " ro",
@@ -249,23 +361,20 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
                 _ => "",
             };
             let flags = format!("{}{}", if row_changed[i] { " chg" } else { "" }, if near[i] { " ctx" } else { "" });
-            let marks = n
-                .and_then(|n| row_marks.get(&(side, n)))
-                .map(|v| v.iter().map(usize::to_string).collect::<Vec<_>>().join(" "));
             let _ = write!(out, "<tr class=\"r{status}{flags}\" data-i=\"{i}\"");
-            if let Some(m) = &marks {
-                let _ = write!(out, " data-c=\"{m}\"");
+            if let Some(ids) = n.and_then(|n| on_row[side].get(&n)) {
+                let _ = write!(out, " data-c=\"{}\"", join_ids(ids));
             }
             let _ = write!(out, "><th class=\"rn\">{}</th>", n.map(|n| n.to_string()).unwrap_or_default());
             for c in &cols {
-                let col = if side { c.base } else { c.other };
+                let col = if side == 0 { c.base } else { c.other };
                 let (Some(row), Some(col)) = (n, col) else {
                     out.push_str("<td class=\"void\"></td>");
                     continue;
                 };
                 let cell = cell_value(sheet, row, col);
                 let text = cell.map(|c| shown(&c.value)).unwrap_or_default();
-                let ids = if side { on_base.get(&(row, col)) } else { on_other.get(&(row, col)) };
+                let ids = on_cell[side].get(&(row, col));
                 let mut class = String::from(col_class(c).trim());
                 if let Some(ids) = ids {
                     let mut kinds: Vec<&str> = ids.iter().map(|&i| kind_class(s.changes[i].kind)).collect();
@@ -280,9 +389,7 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
                 }
                 let _ = write!(out, "<td class=\"{}\"", class.trim());
                 if let Some(ids) = ids {
-                    let _ =
-                        write!(out, " data-c=\"{}\"", ids.iter().map(usize::to_string).collect::<Vec<_>>().join(" "));
-                    let _ = write!(out, " data-a=\"{}\"", cell_name(row, col));
+                    let _ = write!(out, " data-c=\"{}\" data-a=\"{}\"", join_ids(ids), cell_name(row, col));
                 }
                 let title = cell
                     .and_then(|c| c.formula.as_ref())
@@ -295,6 +402,10 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
         out.push_str("</tbody></table></div>");
     }
     out.push_str("</div></section>");
+}
+
+fn cell_row(sheet: &Sheet, row: u32) -> Option<&[Cell]> {
+    sheet.rows.binary_search_by_key(&row, |r| r.index).ok().map(|i| &sheet.rows[i].cells[..])
 }
 
 /// The report's embedded data: every change, by sheet, for the details panel.
@@ -347,7 +458,8 @@ body.notoc #toc{display:none}
 .pane{flex:1 1 0;min-width:0;overflow:auto;background:var(--paper)}
 .pane+.pane{border-left:1px solid var(--line)}
 table.grid{border-collapse:separate;border-spacing:0;font-size:12px;table-layout:fixed}
-.grid th,.grid td{height:22px;max-width:260px;min-width:64px;padding:0 6px;border-right:1px solid #e3e6ea;border-bottom:1px solid #e3e6ea;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grid col:first-child{width:48px}
+.grid th,.grid td{height:22px;padding:0 6px;border-right:1px solid #e3e6ea;border-bottom:1px solid #e3e6ea;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .grid thead th{position:sticky;top:0;z-index:2;background:var(--th);font-weight:500;color:var(--muted);text-align:center}
 .grid th.rn{position:sticky;left:0;z-index:1;min-width:44px;background:var(--th);color:var(--muted);font-weight:400;text-align:right}
 .grid thead th.rn{z-index:3}
@@ -360,8 +472,9 @@ table.grid{border-collapse:separate;border-spacing:0;font-size:12px;table-layout
 td.kf{box-shadow:inset 0 0 0 2px var(--fx)}
 td.km{outline:1px dashed #b45309;outline-offset:-3px}
 td.ko{box-shadow:inset 3px 0 #0e7490}
-td[data-c]{cursor:pointer}
-td.hot,tr.hot th.rn{outline:2px solid var(--accent)!important;outline-offset:-2px}
+td[data-c],th[data-c]{cursor:pointer}
+.grid thead th[data-c]{color:var(--ink);font-weight:700}
+td.hot,th.hot{outline:2px solid var(--accent)!important;outline-offset:-2px}
 body.only .grid tbody tr:not(.ctx){display:none}
 .warn,.lone{margin:8px 12px;color:#8a5a00}
 #info{display:none;flex:none;max-height:38vh;overflow:auto;padding:6px 14px 10px;background:var(--paper);border-top:2px solid var(--accent)}
@@ -384,6 +497,7 @@ const SCRIPT: &str = r#"
   var info=document.getElementById('info'), counter=document.getElementById('at');
   var sheets=[].slice.call(document.querySelectorAll('section.sheet')), links=[].slice.call(document.querySelectorAll('#toc a'));
   var current=0, stops=[], at=-1;
+  var GRID=['value','formula','format','row'];
   if(window.innerWidth<900) body.classList.add('notoc');
   function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
   function val(l){ if(!l) return ''; if(l.formula!==undefined) return '='+l.formula; if(l.value!==undefined) return typeof l.value==='string'?l.value:String(l.value); return l.text||''; }
@@ -405,20 +519,42 @@ const SCRIPT: &str = r#"
     info.innerHTML=ids.map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>';
     if(!body.classList.contains('info')) document.getElementById('infobtn').click();
   }
+  function line(c,i){ return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'; }
   function objects(s){
-    var sheet=data.sheets[s], rest=[];
-    (sheet?sheet.changes:[]).forEach(function(c,i){ if(['value','formula','format','row','column'].indexOf(c.kind)<0) rest.push(i); });
+    var sheet=data.sheets[s], sec=sheets[s], all=sec&&sec.querySelector('[data-nogrid]'), rest=[];
+    (sheet?sheet.changes:[]).forEach(function(c,i){ if(all||GRID.indexOf(c.kind)<0) rest.push(i); });
     var h='';
-    if(rest.length) h+='<h3>Other changes on this sheet</h3><table class="cl">'+rest.map(function(i){var c=sheet.changes[i];return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'}).join('')+'</table>';
-    if(data.objects.length) h+='<h3>Workbook</h3><table class="cl">'+data.objects.map(function(c){return '<tr><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(c.id)+'</td><td>'+esc((c.properties||[]).map(function(p){return p.name+': '+p.base+' → '+p.other}).join('; '))+'</td></tr>'}).join('')+'</table>';
+    if(rest.length) h+='<h3>'+(all?'Changes on this sheet':'Other changes on this sheet')+'</h3><table class="cl">'+rest.map(function(i){return line(sheet.changes[i],i)}).join('')+'</table>';
+    if(data.objects.length) h+='<h3>Workbook</h3><table class="cl">'+data.objects.map(function(c){
+      var detail=(c.properties||[]).map(function(p){return p.name+': '+p.base+' → '+p.other}).join('; ')||val(c.other)||val(c.base);
+      return '<tr><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(c.id)+'</td><td>'+esc(detail)+'</td></tr>'}).join('')+'</table>';
     return h;
+  }
+  // Every place a change shows, on either side: column headers, row
+  // headers, and cells. A place on both sides is one stop (the other side's
+  // element); a change only on the base side (a removed comment) still gets
+  // a stop. Stops run top to bottom, left to right.
+  function collect(sec){
+    var seen={}, list=[];
+    function add(el,row,col){ var k=row+':'+col; if(seen[k]) return; seen[k]=1; list.push({el:el,row:row,col:col}); }
+    ['.pane.o','.pane.b'].forEach(function(p){
+      var pane=sec.querySelector(p); if(!pane) return;
+      [].forEach.call(pane.querySelectorAll('thead th[data-c]'),function(th){ add(th,-1,[].indexOf.call(th.parentNode.children,th)); });
+      [].forEach.call(pane.querySelectorAll('tbody tr'),function(tr){
+        var i=Number(tr.getAttribute('data-i'));
+        if(tr.hasAttribute('data-c')) add(tr.firstChild,i,0);
+        [].forEach.call(tr.querySelectorAll('td[data-c]'),function(td){ add(td,i,[].indexOf.call(tr.children,td)); });
+      });
+    });
+    list.sort(function(a,b){ return a.row-b.row||a.col-b.col; });
+    return list;
   }
   function open(s){
     current=s;
     sheets.forEach(function(x,i){x.classList.toggle('on',i===s)});
     links.forEach(function(a,i){a.classList.toggle('on',i===s)});
     var sec=sheets[s];
-    stops=sec?[].slice.call(sec.querySelectorAll('.pane.o td[data-c], .pane.o tr[data-c] th.rn, .pane.b tr.rb[data-c] th.rn')):[];
+    stops=sec?collect(sec):[];
     at=-1; counter.textContent=stops.length?stops.length+' changes':'no cell changes';
     info.innerHTML=objects(s)||'';
     var o=sec&&sec.querySelector('.pane.o'), b=sec&&sec.querySelector('.pane.b');
@@ -431,26 +567,26 @@ const SCRIPT: &str = r#"
       if(dst.scrollTop!==src.scrollTop||dst.scrollLeft!==src.scrollLeft){ dst.scrollTop=src.scrollTop; dst.scrollLeft=src.scrollLeft; dst.echo=[dst.scrollTop,dst.scrollLeft]; }
     },{passive:true});
   }
-  function hot(el){
+  function hot(stop){
     [].forEach.call(document.querySelectorAll('.hot'),function(x){x.classList.remove('hot')});
-    if(!el) return;
-    var tr=el.closest('tr'), i=tr.getAttribute('data-i'), sec=sheets[current];
-    var col=el.tagName==='TD'?[].indexOf.call(tr.children,el):0;
-    [].forEach.call(sec.querySelectorAll('tr[data-i="'+i+'"]'),function(row){ var c=row.children[col]; if(c) c.classList.add('hot'); });
+    if(!stop) return;
+    var sec=sheets[current];
+    if(stop.row<0){ [].forEach.call(sec.querySelectorAll('thead tr'),function(tr){ var c=tr.children[stop.col]; if(c) c.classList.add('hot'); }); return; }
+    [].forEach.call(sec.querySelectorAll('tr[data-i="'+stop.row+'"]'),function(row){ var c=row.children[stop.col]; if(c) c.classList.add('hot'); });
   }
+  function ids(el){ return (el.getAttribute('data-c')||(el.parentNode&&el.parentNode.getAttribute('data-c'))||'').split(' ').filter(Boolean).map(Number); }
   function select(k){
     if(!stops.length) return;
     at=(k+stops.length)%stops.length;
-    var el=stops[at], pane=el.closest('.pane');
-    var host=el.tagName==='TD'?el:el.parentNode.firstChild;
-    if(body.classList.contains('only')&&!el.closest('tr').classList.contains('ctx')) document.getElementById('only').click();
-    var r=host.getBoundingClientRect(), p=pane.getBoundingClientRect();
-    pane.scrollTop+=r.top-p.top-pane.clientHeight/3;
+    var stop=stops[at], el=stop.el, pane=el.closest('.pane');
+    var tr=el.closest('tr');
+    if(stop.row>=0&&body.classList.contains('only')&&!tr.classList.contains('ctx')) document.getElementById('only').click();
+    var r=el.getBoundingClientRect(), p=pane.getBoundingClientRect();
+    if(stop.row>=0) pane.scrollTop+=r.top-p.top-pane.clientHeight/3;
     if(r.left<p.left||r.right>p.right) pane.scrollLeft+=r.left-p.left-pane.clientWidth/3;
-    hot(el.tagName==='TD'?el:el.parentNode.firstChild);
+    hot(stop);
     counter.textContent=(at+1)+' / '+stops.length;
-    var ids=(el.getAttribute('data-c')||el.parentNode.getAttribute('data-c')||'').split(' ').filter(Boolean).map(Number);
-    show(ids,current);
+    show(ids(el),current);
   }
   document.getElementById('next').onclick=function(){select(at+1)};
   document.getElementById('prev').onclick=function(){select(at-1)};
@@ -463,11 +599,12 @@ const SCRIPT: &str = r#"
   document.getElementById('only').onchange=function(e){ body.classList.toggle('only',e.target.checked); };
   links.forEach(function(a,i){ a.onclick=function(e){e.preventDefault(); open(i);}; });
   document.addEventListener('click',function(e){
-    var cell=e.target.closest('td[data-c], tr[data-c] th.rn');
-    if(cell&&cell.closest('section.sheet')){
-      var ids=(cell.getAttribute('data-c')||cell.parentNode.getAttribute('data-c')).split(' ').map(Number);
-      hot(cell.tagName==='TD'?cell:cell); show(ids,current);
-      var k=stops.indexOf(cell); if(k>=0){at=k;counter.textContent=(at+1)+' / '+stops.length;}
+    var el=e.target.closest('td[data-c], th[data-c], tr[data-c] th.rn');
+    if(el&&el.closest('section.sheet')){
+      var k=-1; stops.forEach(function(s,j){ if(s.el===el) k=j; });
+      if(k<0){ var tr=el.closest('tr'), row=el.closest('thead')?-1:Number(tr.getAttribute('data-i')), col=[].indexOf.call(tr.children,el);
+        stops.forEach(function(s,j){ if(s.row===row&&s.col===col) k=j; }); }
+      if(k>=0) select(k); else show(ids(el),current);
       return;
     }
     var row=e.target.closest('#info tr[data-n]');
@@ -563,6 +700,14 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook) -> String {
 mod tests {
     use super::{Slot, slots};
     use crate::diff::Status;
+
+    #[test]
+    fn moves_and_inserts_in_one_gap_keep_the_other_sides_order() {
+        // The demo: pairs 1-1, 3-2, 4-3, 5-6, 6-7, 7-8; base 2 moved to other 5; other 4 inserted.
+        let got = slots(&[[1, 1, 1], [3, 2, 2], [5, 6, 3]], &[[2, 5, 1]], &[], &[4]);
+        let others: Vec<Option<u32>> = got.iter().map(|s| s.other).collect();
+        assert_eq!(others, [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7), Some(8)]);
+    }
 
     #[test]
     fn slots_interleave_one_sided_and_moved_rows() {

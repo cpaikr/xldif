@@ -106,7 +106,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             let listing = comparison.list(&Filter { sheet, kinds, limit: (limit > 0).then_some(limit), all });
             let rendered = match format {
                 CompareFormat::Text => Output::Text(compare_text(&listing, &warnings)),
-                _ => Output::Json { result: json(&listing), warnings },
+                _ => Output::Json { result: json(&listing), warnings: warnings.clone() },
             };
             match (output, rendered) {
                 (None, rendered) => Ok(rendered),
@@ -114,7 +114,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     write_output(&path, text.as_bytes(), &[&base, &other], force)?;
                     Ok(Output::Json {
                         result: serde_json::json!({"written": path.display().to_string(), "bytes": text.len()}),
-                        warnings: Vec::new(),
+                        warnings,
                     })
                 }
                 (Some(path), Output::Json { result, warnings }) => {
@@ -163,16 +163,34 @@ fn write_output(path: &Path, bytes: &[u8], inputs: &[&Path], force: bool) -> Res
             .with_hint("pass --force to replace it")
             .into());
     }
+    if path.is_dir() {
+        return Err(Error::new(ErrorCode::InvalidArgument, format!("{} is a directory", path.display()))
+            .with_hint("give -o a file name, such as report.html")
+            .into());
+    }
     let io =
         |e: std::io::Error| Failure::from(Error::new(ErrorCode::IoError, format!("writing {}: {e}", path.display())));
-    let mut temp = path.as_os_str().to_owned();
-    temp.push(".xldif-tmp");
-    let temp = std::path::PathBuf::from(temp);
-    std::fs::write(&temp, bytes).map_err(io)?;
-    if path.exists() {
-        std::fs::remove_file(path).map_err(io)?;
+    // A fresh temporary file beside the target (create_new never touches an
+    // existing file, so it cannot clobber an input), renamed over the target
+    // only once it is complete; rename replaces an existing file atomically.
+    let mut attempt = 0u32;
+    let (temp, mut file) = loop {
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".xldif-{}-{attempt}.tmp", std::process::id()));
+        let temp = std::path::PathBuf::from(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&temp) {
+            Ok(file) => break (temp, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 100 => attempt += 1,
+            Err(e) => return Err(io(e)),
+        }
+    };
+    let written = std::io::Write::write_all(&mut file, bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if let Err(e) = written.and_then(|()| std::fs::rename(&temp, path)) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(io(e));
     }
-    std::fs::rename(&temp, path).map_err(io)
+    Ok(())
 }
 
 fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
