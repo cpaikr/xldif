@@ -112,6 +112,14 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         None => Vec::new(),
     };
 
+    let styles = match rels.iter().find(|r| r.kind == "styles") {
+        Some(rel) => match pkg.read_text(&rel.target)? {
+            Some(text) => crate::styles::parse_styles(&text, &rel.target)?,
+            None => crate::styles::Styles::default(),
+        },
+        None => crate::styles::Styles::default(),
+    };
+
     let mut warnings = Vec::new();
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     for entry in &wb.sheets {
@@ -162,7 +170,7 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         };
         defined_names.push(DefinedName { name: n.name, scope, refers_to: n.refers_to, hidden: n.hidden });
     }
-    Ok(Workbook { format, date1904: wb.date1904, calculation: wb.calculation, sheets, defined_names, warnings })
+    Ok(Workbook { format, date1904: wb.date1904, calculation: wb.calculation, sheets, defined_names, styles, warnings })
 }
 
 fn truthy(v: Option<&str>) -> bool {

@@ -180,6 +180,8 @@ pub struct Workbook {
     pub calculation: Calculation,
     pub sheets: Vec<Sheet>,
     pub defined_names: Vec<DefinedName>,
+    /// Resolved cell formats, by the `style` index cells carry.
+    pub styles: crate::styles::Styles,
     pub warnings: Vec<Warning>,
 }
 

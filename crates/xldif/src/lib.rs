@@ -12,6 +12,7 @@ pub mod formula;
 pub mod model;
 mod package;
 pub mod reader;
+pub mod styles;
 pub mod views;
 mod xml;
 
