@@ -834,12 +834,16 @@ fn diff_formulas(
             let moved = formula::remap(&tb, this, |name| maps.get(&name.to_lowercase()));
             if formula::same(&moved, &to) {
                 if formula::same(&tb, &to) { FormulaDiff::Same } else { FormulaDiff::Adjusted }
-            } else if formula::same(&tb, &to) && !formula::widens(&tb, &moved) {
-                // Unchanged text where the adjustment would only shrink or
-                // shift: a row edited in place can align as deleted plus
-                // inserted, so this is not evidence of a change. Unchanged
-                // text where Excel would have widened a range over inserted
-                // rows (a total no longer covering a new line) is reported.
+            } else if formula::same(&tb, &to)
+                && !formula::widens(&tb, &moved)
+                && !formula::retargets(&tb, this, |name| maps.get(&name.to_lowercase()))
+            {
+                // Unchanged text where the adjustment only reflects a deleted
+                // row at a range's edge: a row edited in place can align as
+                // deleted plus inserted, so this is not evidence of a change.
+                // Unchanged text is reported when Excel would have widened a
+                // range over inserted rows (a total no longer covering a new
+                // line) or when a referenced cell that still exists moved.
                 FormulaDiff::Same
             } else {
                 let expected = (!formula::same(&moved, &tb)).then(|| formula::render(&moved));
@@ -858,6 +862,8 @@ struct FormulaEdit {
     co: u32,
     /// Index of the row pair, so "neighbouring" follows the alignment.
     k: usize,
+    /// On a moved row; such edits never fold with others.
+    moved: bool,
     status: Status,
     base: Option<String>,
     other: Option<String>,
@@ -947,6 +953,7 @@ fn sheet_changes(
                         ro,
                         co,
                         k,
+                        moved: k > row_al.pairs.len(),
                         status: match (&base, &other) {
                             (None, _) => Status::OnlyOther,
                             (_, None) => Status::OnlyBase,
@@ -1009,7 +1016,12 @@ fn fold_formula_edits(
         if let Some(run) = runs.last_mut()
             && let Some(last) = run.last()
             && (last.cb, last.co) == (e.cb, e.co)
+            && !e.moved
+            && !last.moved
             && e.k == last.k + 1
+            // Folded ranges must cover exactly the changed cells on both sides.
+            && e.rb == last.rb + 1
+            && e.ro == last.ro + 1
             && last.status == e.status
             && last.shape == e.shape
         {

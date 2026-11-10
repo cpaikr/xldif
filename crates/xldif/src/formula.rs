@@ -386,6 +386,28 @@ pub fn same(a: &[Token], b: &[Token]) -> bool {
     }
 }
 
+/// Whether a reference in the formula points at a row or column that exists
+/// on both sides (paired or moved) but under a different number: the cell
+/// it read moved, so unchanged text now reads something else.
+pub fn retargets<'a>(tokens: &[Token], this: &SheetMap, sheet: impl Fn(&str) -> Option<&'a SheetMap>) -> bool {
+    let moved = |n: u32, axis: &AxisMap| axis.exact(n).is_some_and(|m| m != n);
+    tokens.iter().any(|t| {
+        let Token::Ref(r) = t else { return false };
+        let Some(map) = (match &r.sheet {
+            None => Some(this),
+            Some(s) => sheet(s),
+        }) else {
+            return false;
+        };
+        let point = |p: &Point| match *p {
+            Point::Cell { row, col, .. } => moved(row, &map.rows) || moved(col, &map.cols),
+            Point::Row { row, .. } => moved(row, &map.rows),
+            Point::Col { col, .. } => moved(col, &map.cols),
+        };
+        point(&r.start) || r.end.as_ref().is_some_and(point)
+    })
+}
+
 /// Whether carrying a formula through an alignment (`moved`, from
 /// [`remap`] of `base`) made some range cover more rows or columns: rows or
 /// columns were inserted inside it, which Excel would have absorbed.
@@ -542,6 +564,15 @@ impl AxisMap {
     /// The identity: every number maps to itself.
     pub fn identity(max: u32) -> Self {
         Self { max, ..Self::default() }
+    }
+
+    /// Where `n` went when its own row or column was paired or moved; `None`
+    /// for numbers the alignment only interpolates or deleted.
+    pub fn exact(&self, n: u32) -> Option<u32> {
+        if let Ok(i) = self.pairs.binary_search_by_key(&n, |p| p.0) {
+            return Some(self.pairs[i].1);
+        }
+        self.moves.binary_search_by_key(&n, |m| m.0).ok().map(|i| self.moves[i].1)
     }
 
     /// How many of `sorted` lie strictly between `lo` and `hi`.

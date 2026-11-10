@@ -28,6 +28,10 @@ pub struct Limits {
     /// Cells, rows, shared strings, sheets, and defined names together
     /// (about 100 bytes of memory each).
     pub max_records: usize,
+    /// Formula text written out for the cells of shared formulas, which the
+    /// file stores once: a long anchor shared by many cells would otherwise
+    /// cost its length once per cell.
+    pub max_formula_bytes: u64,
 }
 
 impl Default for Limits {
@@ -38,6 +42,7 @@ impl Default for Limits {
             max_member_bytes: 1 << 30,
             max_total_bytes: 4 << 30,
             max_records: 20_000_000,
+            max_formula_bytes: 1 << 29,
         }
     }
 }

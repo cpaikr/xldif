@@ -190,11 +190,25 @@ fn a_total_left_unchanged_over_an_inserted_row_is_a_change() {
 }
 
 #[test]
-fn a_change_filled_down_folds_across_an_insertion() {
+fn folded_ranges_cover_only_changed_cells() {
+    // The same edit on both sides of an inserted row: a folded range would
+    // cover the inserted row too, so the edits stay separate, each with the
+    // same adjusted formula.
     let base: Grid = &[&["k", "v", "r"], &["a", "1", "=B2*2|2"], &["b", "2", "=B3*2|4"]];
     let other: Grid = &[&["k", "v", "r"], &["a", "1", "=B2*3|3"], &["new", "9"], &["b", "2", "=B4*3|6"]];
     let c = run(&[("S", base)], &[("S", other)]);
     let f = formulas(&c);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert!(f.iter().all(|c| c.base.as_ref().unwrap().range.is_none()));
+}
+
+#[test]
+fn unchanged_text_that_now_reads_a_moved_cell_is_a_change() {
+    let base: Grid = &[&["a", "1"], &["b", "2"], &["ref", "=B2|2"]];
+    // A row inserted above "b": B2's content moved to B3, but the formula still reads B2.
+    let other: Grid = &[&["a", "1"], &["new", "5"], &["b", "2"], &["ref", "=B2|5"]];
+    let c = run(&[("S", base)], &[("S", other)]);
+    let f = formulas(&c);
     assert_eq!(f.len(), 1, "{f:?}");
-    assert_eq!(f[0].base.as_ref().unwrap().range.as_deref(), Some("C2:C3"));
+    assert_eq!(f[0].expected.as_deref(), Some("B3"));
 }

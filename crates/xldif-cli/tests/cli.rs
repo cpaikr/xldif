@@ -278,3 +278,25 @@ fn compare_rejects_bad_options() {
     let run = xldif(["compare", s(&book), s(&book), "--kind", "colour"]);
     assert_eq!(run.code, 2);
 }
+
+#[test]
+fn compare_reports_formula_changes_in_json_and_text() {
+    let work = Work::new();
+    let grid = |total: &str| -> Vec<u8> {
+        xldif_fixtures::grid_book(&[(
+            "BS",
+            &[&["Account", "2025"], &["Cash", "100"], &["Debt", "40"], &["Net", total]],
+        )])
+    };
+    let base = work.file("v1.xlsx", &grid("=B2-B3|60"));
+    let other = work.file("v2.xlsx", &grid("=B2+B3|140"));
+    let env = ok(&xldif(["compare", s(&base), s(&other), "--kind", "formula"]), "compare");
+    let changes = env["result"]["sheets"][0]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["id"], "s0:formula:B4:B4");
+    assert_eq!(changes[0]["base"]["formula"], "B2-B3");
+    assert_eq!(changes[0]["other"]["formula"], "B2+B3");
+    assert_eq!(env["result"]["summary"]["formula"], 1);
+    let text = xldif(["compare", s(&base), s(&other), "--kind", "formula", "--format", "text"]);
+    assert!(text.stdout.contains("formula	changed	B4→B4	=B2-B3 → =B2+B3	Net | 2025"), "{}", text.stdout);
+}
