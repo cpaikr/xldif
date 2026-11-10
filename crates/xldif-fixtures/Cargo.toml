@@ -1,0 +1,17 @@
+[package]
+name = "xldif-fixtures"
+description = "Synthetic workbooks for xldif tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+rust_xlsxwriter.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+zip.workspace = true
