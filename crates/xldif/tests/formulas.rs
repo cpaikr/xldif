@@ -152,3 +152,49 @@ fn unlabelled_formula_rows_align_after_an_insertion() {
     assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
     assert_eq!((c.summary.rows_only_other, c.summary.value, c.summary.formulas_adjusted), (1, 0, 30));
 }
+
+#[test]
+fn ref_errors_from_deleted_rows_are_adjustments() {
+    let base: Grid = &[&["A", "1"], &["B", "2"], &["C", "3", "=B3*2|6"], &["D", "4", "=B3+1|4"]];
+    // Row 3 (C) deleted: Excel turns references to it into #REF!.
+    let other: Grid = &[&["A", "1"], &["B", "2"], &["D", "4", "=#REF!+1|0"]];
+    let notes: Grid = &[&["x", "=BS!B3|3"]];
+    let notes_after: Grid = &[&["x", "=BS!#REF!|0"]];
+    let c = run(&[("BS", base), ("Notes", notes)], &[("BS", other), ("Notes", notes_after)]);
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+    assert_eq!(c.summary.formulas_adjusted, 2);
+}
+
+#[test]
+fn blank_spacer_rows_next_to_an_insertion_map_with_it() {
+    let base: Grid = &[&["Item", "Amount"], &["a", "1"], &["b", "2"], &["c", "3"], &[], &["Total", "=SUM(B2:B5)|6"]];
+    // A line item added above the spacer row.
+    let inserted: Grid =
+        &[&["Item", "Amount"], &["a", "1"], &["b", "2"], &["c", "3"], &["d", "4"], &[], &["Total", "=SUM(B2:B6)|10"]];
+    let c = run(&[("S", base)], &[("S", inserted)]);
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+    // A line item deleted above the spacer row.
+    let deleted: Grid = &[&["Item", "Amount"], &["a", "1"], &["b", "2"], &[], &["Total", "=SUM(B2:B4)|3"]];
+    let c = run(&[("S", base)], &[("S", deleted)]);
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+}
+
+#[test]
+fn a_total_left_unchanged_over_an_inserted_row_is_a_change() {
+    let other: Grid =
+        &[BS[0], BS[1], &["Prepaid", "50"], BS[2], &["Total", "=SUM(B2:B3)|150"], &["Double", "=B5*2|300"]];
+    let c = run(&[("BS", BS)], &[("BS", other)]);
+    let f = formulas(&c);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].expected.as_deref(), Some("SUM(B2:B4)"));
+}
+
+#[test]
+fn a_change_filled_down_folds_across_an_insertion() {
+    let base: Grid = &[&["k", "v", "r"], &["a", "1", "=B2*2|2"], &["b", "2", "=B3*2|4"]];
+    let other: Grid = &[&["k", "v", "r"], &["a", "1", "=B2*3|3"], &["new", "9"], &["b", "2", "=B4*3|6"]];
+    let c = run(&[("S", base)], &[("S", other)]);
+    let f = formulas(&c);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].base.as_ref().unwrap().range.as_deref(), Some("C2:C3"));
+}

@@ -285,6 +285,17 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     renamed.
   - Array formulas compare by their anchor text; the spill range itself is
     not compared yet, and dynamic-array metadata is not read.
+  - Unchanged text is a change only when Excel would have widened one of
+    its ranges over inserted rows or columns (a total no longer covering a
+    new line). When the adjustment would only shrink or shift a range, the
+    unchanged text wins: a row edited in place can align as deleted plus
+    inserted, and the formula was not touched.
+  - `#REF!` (and `Sheet!#REF!`) from a deleted reference is an adjustment.
+    3-D references (`Jan:Dec!B5`) and external ones (`[1]Prices!A1`) shift
+    in shared formulas but never follow this workbook's alignment.
+  - Blank rows between two paired rows are matched in order with the other
+    side's blank rows in the same gap, so a spacer row next to an inserted
+    or deleted line maps where Excel moved it.
   - Cached values are compared separately, as values.
 - **Formatting:**
   - Compare each written cell's resolved properties: number format, font

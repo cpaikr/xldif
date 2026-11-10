@@ -56,9 +56,9 @@ pub enum Token {
     /// Anything else: functions, names, numbers, operators. Compared without
     /// case; whitespace tokens are ignored.
     Text(String),
-    /// A reference that no longer exists: its target was deleted or shifted
-    /// off the grid.
-    RefError,
+    /// A reference that no longer exists (`#REF!`, or `Sheet!#REF!` with its
+    /// sheet): its target was deleted or shifted off the grid.
+    RefError(Option<String>),
 }
 
 fn is_word_char(c: char) -> bool {
@@ -119,6 +119,20 @@ fn parse_reference(s: &str) -> Option<(Point, Option<Point>, usize)> {
     matches!(first, Point::Cell { .. }).then_some((first, None, first_len))
 }
 
+/// What follows a sheet prefix and `!`: a reference, or `#REF!`.
+fn qualified(sheet: String, target: &str) -> Option<(Token, usize)> {
+    if target.get(..5).is_some_and(|t| t.eq_ignore_ascii_case("#REF!")) {
+        return Some((Token::RefError(Some(sheet)), 5));
+    }
+    let (start, end, used) = parse_reference(target)?;
+    Some((Token::Ref(Reference { sheet: Some(sheet), start, end }), used))
+}
+
+/// The length of the word starting `s` (sheet names, names, references).
+fn word_len(s: &str) -> usize {
+    s.chars().take_while(|c| is_word_char(*c)).map(char::len_utf8).sum()
+}
+
 /// Tokenizes a formula as stored (without the leading `=`).
 pub fn tokenize(formula: &str) -> Vec<Token> {
     let mut out = Vec::new();
@@ -130,19 +144,37 @@ pub fn tokenize(formula: &str) -> Vec<Token> {
             rest = &rest[used..];
         } else if c == '\'' {
             let (sheet, used) = quoted(rest, '\'');
-            if let Some((start, end, len)) = rest[used..].strip_prefix('!').and_then(parse_reference) {
-                out.push(Token::Ref(Reference { sheet: Some(sheet), start, end }));
+            if let Some((token, len)) = rest[used..].strip_prefix('!').and_then(|t| qualified(sheet, t)) {
+                out.push(token);
                 rest = &rest[used + 1 + len..];
             } else {
                 out.push(Token::Text(rest[..used].to_owned()));
                 rest = &rest[used..];
             }
+        } else if c == '#' && rest.get(..5).is_some_and(|t| t.eq_ignore_ascii_case("#REF!")) {
+            out.push(Token::RefError(None));
+            rest = &rest[5..];
         } else if c == '[' || c == '#' {
-            // External workbooks ([1]Sheet!A1) and error literals (#REF!)
-            // stay opaque.
-            let len = opaque_len(rest);
-            out.push(Token::Text(rest[..len].to_owned()));
-            rest = &rest[len..];
+            // An external workbook's sheet ([1]Prices!A1) is a reference that
+            // shifts with a shared formula but never follows this workbook's
+            // alignment; anything else (error literals, unusual brackets)
+            // stays opaque.
+            let book = bracketed_len(rest);
+            let name = word_len(&rest[book..]);
+            let external = c == '['
+                && rest[1..book.saturating_sub(1)].bytes().all(|b| b.is_ascii_digit())
+                && name > 0
+                && rest[book + name..].starts_with('!');
+            if let Some((token, len)) =
+                external.then(|| qualified(rest[..book + name].to_owned(), &rest[book + name + 1..])).flatten()
+            {
+                out.push(token);
+                rest = &rest[book + name + 1 + len..];
+            } else {
+                let len = opaque_len(rest);
+                out.push(Token::Text(rest[..len].to_owned()));
+                rest = &rest[len..];
+            }
         } else if c.is_whitespace() {
             let len: usize = rest.chars().take_while(|c| c.is_whitespace()).map(char::len_utf8).sum();
             out.push(Token::Text(rest[..len].to_owned()));
@@ -157,9 +189,20 @@ pub fn tokenize(formula: &str) -> Vec<Token> {
                 out.push(Token::Text(rest[..total].to_owned()));
                 rest = &rest[total..];
             } else if let Some(target) = after.strip_prefix('!')
-                && let Some((start, end, used)) = parse_reference(target)
+                && let Some((token, used)) = qualified(word.to_owned(), target)
             {
-                out.push(Token::Ref(Reference { sheet: Some(word.to_owned()), start, end }));
+                out.push(token);
+                rest = &target[used..];
+            } else if let Some(second) = after.strip_prefix(':')
+                && let n = word_len(second)
+                && n > 0
+                && let Some(target) = second[n..].strip_prefix('!')
+                && let Some((token, used)) = qualified(format!("{word}:{}", &second[..n]), target)
+            {
+                // A 3-D reference across sheets (Jan:Dec!B5): one reference
+                // whose "sheet" names the span. It shifts in shared formulas
+                // and is otherwise left as written.
+                out.push(token);
                 rest = &target[used..];
             } else if after.starts_with('(') {
                 out.push(Token::Text(word.to_owned()));
@@ -246,11 +289,39 @@ fn render_point(out: &mut String, p: &Point) {
     }
 }
 
+/// Whether Excel would quote this sheet name in a reference: names that
+/// are not plain words, start with a digit, or read as a cell, an R1C1
+/// reference, or a boolean.
 fn needs_quotes(sheet: &str) -> bool {
+    let upper = sheet.to_ascii_uppercase();
+    let r1c1 = {
+        let rest =
+            upper.strip_prefix('R').map_or(upper.as_str(), |r| r.trim_start_matches(|c: char| c.is_ascii_digit()));
+        let rest = rest.strip_prefix('C').map_or(rest, |r| r.trim_start_matches(|c: char| c.is_ascii_digit()));
+        rest.is_empty() && (upper.starts_with('R') || upper.starts_with('C'))
+    };
     sheet.is_empty()
         || sheet.chars().next().is_some_and(|c| c.is_ascii_digit())
         || !sheet.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-        || parse_point(sheet).is_some()
+        || matches!(parse_point(sheet), Some(Point::Cell { .. }))
+        || r1c1
+        || upper == "TRUE"
+        || upper == "FALSE"
+}
+
+/// `Sheet!`, `'My sheet'!`, `Jan:Dec!`, or `[1]Prices!` as Excel writes it.
+fn write_sheet(out: &mut String, sheet: &str) {
+    // An external workbook index or a 3-D span is quoted as a whole only
+    // when one of its names needs it.
+    let (book, names) = match sheet.strip_prefix('[').and_then(|r| r.split_once(']')) {
+        Some((n, rest)) => (format!("[{n}]"), rest),
+        None => (String::new(), sheet),
+    };
+    if names.split(':').any(needs_quotes) {
+        let _ = write!(out, "'{}'!", sheet.replace('\'', "''"));
+    } else {
+        let _ = write!(out, "{book}{names}!");
+    }
 }
 
 /// Formula text from tokens, as Excel would store it.
@@ -260,11 +331,7 @@ pub fn render(tokens: &[Token]) -> String {
         match t {
             Token::Ref(r) => {
                 if let Some(sheet) = &r.sheet {
-                    if needs_quotes(sheet) {
-                        let _ = write!(out, "'{}'!", sheet.replace('\'', "''"));
-                    } else {
-                        let _ = write!(out, "{sheet}!");
-                    }
+                    write_sheet(&mut out, sheet);
                 }
                 render_point(&mut out, &r.start);
                 if let Some(end) = &r.end {
@@ -276,7 +343,12 @@ pub fn render(tokens: &[Token]) -> String {
                 let _ = write!(out, "\"{}\"", s.replace('"', "\"\""));
             }
             Token::Text(t) => out.push_str(t),
-            Token::RefError => out.push_str("#REF!"),
+            Token::RefError(sheet) => {
+                if let Some(sheet) = sheet {
+                    write_sheet(&mut out, sheet);
+                }
+                out.push_str("#REF!");
+            }
         }
     }
     out
@@ -303,10 +375,41 @@ pub fn same(a: &[Token], b: &[Token]) -> bool {
                     return false;
                 }
             }
+            (Some(Token::RefError(p)), Some(Token::RefError(q))) => {
+                if p.as_ref().map(|s| s.to_lowercase()) != q.as_ref().map(|s| s.to_lowercase()) {
+                    return false;
+                }
+            }
             (Some(p), Some(q)) if p == q => {}
             _ => return false,
         }
     }
+}
+
+/// Whether carrying a formula through an alignment (`moved`, from
+/// [`remap`] of `base`) made some range cover more rows or columns: rows or
+/// columns were inserted inside it, which Excel would have absorbed.
+pub fn widens(base: &[Token], moved: &[Token]) -> bool {
+    let span = |p: &Point, q: &Point| -> (u32, u32) {
+        match (*p, *q) {
+            (Point::Cell { row: r1, col: c1, .. }, Point::Cell { row: r2, col: c2, .. }) => {
+                (r1.abs_diff(r2), c1.abs_diff(c2))
+            }
+            (Point::Row { row: a, .. }, Point::Row { row: b, .. }) => (a.abs_diff(b), 0),
+            (Point::Col { col: a, .. }, Point::Col { col: b, .. }) => (0, a.abs_diff(b)),
+            _ => (0, 0),
+        }
+    };
+    base.iter().zip(moved).any(|(b, m)| match (b, m) {
+        (Token::Ref(rb), Token::Ref(rm)) => match (&rb.end, &rm.end) {
+            (Some(eb), Some(em)) => {
+                let (before, after) = (span(&rb.start, eb), span(&rm.start, em));
+                after.0 > before.0 || after.1 > before.1
+            }
+            _ => false,
+        },
+        _ => false,
+    })
 }
 
 /// The formula as written in the cell at `row`, `col`, in a position-free
@@ -333,7 +436,7 @@ pub fn relative_form(tokens: &[Token], row: u32, col: u32) -> String {
         match t {
             Token::Ref(r) => {
                 if let Some(sheet) = &r.sheet {
-                    let _ = write!(out, "'{}'!", sheet.to_lowercase());
+                    let _ = write!(out, "{:?}!", sheet.to_lowercase());
                 }
                 point(&mut out, &r.start);
                 if let Some(end) = &r.end {
@@ -341,12 +444,15 @@ pub fn relative_form(tokens: &[Token], row: u32, col: u32) -> String {
                     point(&mut out, end);
                 }
             }
+            // Debug quoting escapes quotes, so distinct literals stay distinct.
             Token::Str(s) => {
-                let _ = write!(out, "\"{s}\"");
+                let _ = write!(out, "{s:?}");
             }
             Token::Text(s) if s.trim().is_empty() => {}
             Token::Text(s) => out.push_str(&s.to_lowercase()),
-            Token::RefError => out.push_str("#ref!"),
+            Token::RefError(sheet) => {
+                let _ = write!(out, "{:?}!#ref!", sheet.as_deref().map(str::to_lowercase));
+            }
         }
     }
     out
@@ -384,7 +490,7 @@ pub fn shift(tokens: &[Token], rows: i64, cols: i64) -> Vec<Token> {
                     (Some(start), Some(Some(end))) => {
                         Token::Ref(Reference { sheet: r.sheet.clone(), start, end: Some(end) })
                     }
-                    _ => Token::RefError,
+                    _ => Token::RefError(r.sheet.clone()),
                 }
             }
             other => other.clone(),
@@ -393,8 +499,13 @@ pub fn shift(tokens: &[Token], rows: i64, cols: i64) -> Vec<Token> {
 }
 
 /// Maps base row (or column) numbers to the other side's numbers, from an
-/// alignment of content rows. Numbers between paired rows (blank rows,
-/// cells no row item covered) move with the pair before them.
+/// alignment of content rows.
+///
+/// Numbers between two paired rows (blank rows, cells no row item covered)
+/// are matched in order with the other side's blank rows in the same gap,
+/// skipping rows that were deleted, inserted, or moved there; when the two
+/// gaps hold different numbers of blank rows, a number keeps its offset from
+/// the pair before it, less the deletions in between.
 #[derive(Debug, Clone, Default)]
 pub struct AxisMap {
     /// Ordered `(base, other)` pairs.
@@ -403,20 +514,41 @@ pub struct AxisMap {
     moves: Vec<(u32, u32)>,
     /// Base numbers whose item was deleted, sorted.
     deleted: Vec<u32>,
+    /// Base numbers that are not blank but unpaired: deleted or moved away.
+    base_taken: Vec<u32>,
+    /// Other numbers that are not blank but unpaired: inserted or moved here.
+    other_taken: Vec<u32>,
     max: u32,
 }
 
 impl AxisMap {
-    pub fn new(mut pairs: Vec<(u32, u32)>, mut moves: Vec<(u32, u32)>, mut deleted: Vec<u32>, max: u32) -> Self {
+    pub fn new(
+        mut pairs: Vec<(u32, u32)>,
+        mut moves: Vec<(u32, u32)>,
+        mut deleted: Vec<u32>,
+        inserted: Vec<u32>,
+        max: u32,
+    ) -> Self {
         pairs.sort_unstable();
         moves.sort_unstable();
         deleted.sort_unstable();
-        Self { pairs, moves, deleted, max }
+        let mut base_taken: Vec<u32> = deleted.iter().copied().chain(moves.iter().map(|m| m.0)).collect();
+        let mut other_taken: Vec<u32> = inserted.into_iter().chain(moves.iter().map(|m| m.1)).collect();
+        base_taken.sort_unstable();
+        other_taken.sort_unstable();
+        Self { pairs, moves, deleted, base_taken, other_taken, max }
     }
 
     /// The identity: every number maps to itself.
     pub fn identity(max: u32) -> Self {
         Self { max, ..Self::default() }
+    }
+
+    /// How many of `sorted` lie strictly between `lo` and `hi`.
+    fn between(sorted: &[u32], lo: u32, hi: u32) -> u32 {
+        let a = sorted.partition_point(|&x| x <= lo);
+        let b = sorted.partition_point(|&x| x < hi);
+        u32::try_from(b.saturating_sub(a)).unwrap_or(u32::MAX)
     }
 
     /// Where base number `n` is on the other side, or `None` if it was deleted.
@@ -427,15 +559,32 @@ impl AxisMap {
         if let Ok(i) = self.moves.binary_search_by_key(&n, |m| m.0) {
             return Some(self.moves[i].1);
         }
-        let before = self.pairs.partition_point(|p| p.0 <= n);
-        let (b, o) = match before {
-            0 => match self.pairs.first() {
-                Some(&p) => p,
-                None => return Some(n),
-            },
-            k => self.pairs[k - 1],
-        };
-        offset(o, i64::from(n) - i64::from(b), self.max)
+        if let Ok(i) = self.pairs.binary_search_by_key(&n, |p| p.0) {
+            return Some(self.pairs[i].1);
+        }
+        if self.pairs.is_empty() && self.base_taken.is_empty() && self.other_taken.is_empty() {
+            return Some(n);
+        }
+        let k = self.pairs.partition_point(|p| p.0 < n);
+        let (b1, o1) = if k == 0 { (0, 0) } else { self.pairs[k - 1] };
+        // n's place among the base gap's blank numbers, 0-based.
+        let index = n - b1 - 1 - Self::between(&self.base_taken, b1, n);
+        if let Some(&(b2, o2)) = self.pairs.get(k) {
+            let base_blanks = (b2 - b1 - 1) - Self::between(&self.base_taken, b1, b2);
+            let other_blanks = (o2.saturating_sub(o1 + 1)).saturating_sub(Self::between(&self.other_taken, o1, o2));
+            if base_blanks == other_blanks {
+                // The index-th other number after o1 that is not taken.
+                let mut x = o1 + 1 + index;
+                loop {
+                    let next = o1 + 1 + index + Self::between(&self.other_taken, o1, x + 1);
+                    if next == x {
+                        return Some(x);
+                    }
+                    x = next;
+                }
+            }
+        }
+        offset(o1, i64::from(index) + 1, self.max)
     }
 
     /// The first surviving number at or after `n`, up to `limit`, mapped.
@@ -522,7 +671,10 @@ pub fn remap<'a>(tokens: &[Token], this: &SheetMap, sheet: impl Fn(&str) -> Opti
                 None => remap_point(&r.start, &map.rows, &map.cols).map(|p| (p, None)),
                 Some(end) => remap_range(&r.start, end, &map.rows, &map.cols).map(|(s, e)| (s, Some(e))),
             };
-            moved.map_or(Token::RefError, |(start, end)| Token::Ref(Reference { sheet: name, start, end }))
+            match moved {
+                Some((start, end)) => Token::Ref(Reference { sheet: name, start, end }),
+                None => Token::RefError(name),
+            }
         })
         .collect()
 }
@@ -576,6 +728,44 @@ mod tests {
     }
 
     #[test]
+    fn three_d_and_external_references_shift_but_never_remap() {
+        for f in ["SUM(Jan:Dec!B5)", "[1]Data!B1*2", "SUM('Sheet 1:Sheet 3'!A1)", "Notes!#REF!+#REF!"] {
+            round_trip(f);
+        }
+        assert_eq!(render(&shift(&tokenize("SUM(Jan:Dec!B5)+[1]Data!B1"), 1, 0)), "SUM(Jan:Dec!B6)+[1]Data!B2");
+        let map = rows_inserted_at(1, 1);
+        assert_eq!(
+            render(&remap(&tokenize("SUM(Jan:Dec!B5)+[1]Data!B1+B1"), &map, |_| None)),
+            "SUM(Jan:Dec!B5)+[1]Data!B1+B2"
+        );
+    }
+
+    #[test]
+    fn sheet_names_that_read_as_references_are_quoted() {
+        let r = |sheet: &str| {
+            render(&[Token::Ref(Reference {
+                sheet: Some(sheet.into()),
+                start: Point::Cell { row: 1, col: 1, row_abs: false, col_abs: false },
+                end: None,
+            })])
+        };
+        assert_eq!(r("R2C3"), "'R2C3'!A1");
+        assert_eq!(r("TRUE"), "'TRUE'!A1");
+        assert_eq!(r("Notes"), "Notes!A1");
+    }
+
+    #[test]
+    fn blank_rows_follow_the_gap_they_sit_in() {
+        // Base rows 1..=4 content, 5 blank, 6 content; other inserts a row at 5.
+        let map = AxisMap::new(vec![(1, 1), (2, 2), (3, 3), (4, 4), (6, 7)], vec![], vec![], vec![5], 100);
+        assert_eq!(map.map(5), Some(6));
+        // Base row 4 deleted; blank row 5 closes up.
+        let map = AxisMap::new(vec![(1, 1), (2, 2), (3, 3), (6, 5)], vec![], vec![4], vec![], 100);
+        assert_eq!(map.map(5), Some(4));
+        assert_eq!(map.map(4), None);
+    }
+
+    #[test]
     fn sameness_ignores_spacing_and_case() {
         assert!(same(&tokenize("sum( a1 , B2 )"), &tokenize("SUM(A1,B2)")));
         assert!(!same(&tokenize("SUM(A1,B2)"), &tokenize("SUM(A1,B3)")));
@@ -587,7 +777,7 @@ mod tests {
         let pairs = (1..=50).map(|r| (r, if r >= at { r + count } else { r })).collect();
         SheetMap {
             renamed_to: None,
-            rows: AxisMap::new(pairs, vec![], vec![], 1_048_576),
+            rows: AxisMap::new(pairs, vec![], vec![], vec![], 1_048_576),
             cols: AxisMap::identity(16_384),
         }
     }
@@ -607,7 +797,7 @@ mod tests {
         let pairs = (1..=20).filter(|r| *r != 10).map(|r| (r, if r > 10 { r - 1 } else { r })).collect();
         let map = SheetMap {
             renamed_to: None,
-            rows: AxisMap::new(pairs, vec![], vec![10], 1_048_576),
+            rows: AxisMap::new(pairs, vec![], vec![10], vec![], 1_048_576),
             cols: AxisMap::identity(16_384),
         };
         let adjust = |f: &str| render(&remap(&tokenize(f), &map, |_| None));

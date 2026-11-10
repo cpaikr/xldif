@@ -582,8 +582,17 @@ impl<'a> Grid<'a> {
             .map(|(_, cells)| {
                 let header: Vec<String> =
                     cells.iter().filter(|(r, _)| header_rows.contains(r)).filter_map(|(_, c)| header_text(c)).collect();
-                let mut tokens: Vec<u64> =
-                    cells.iter().flat_map(|(r, c)| cell_tokens(c, *r)).map(|b| fnv(&[&b])).collect();
+                let mut tokens: Vec<u64> = cells
+                    .iter()
+                    .flat_map(|(r, c)| {
+                        // A column's formulas change form whenever a column they
+                        // refer to moves, so they only stand in for a missing value.
+                        let value = value_bytes(&c.value);
+                        let formula = if value.is_none() { cell_tokens(c, *r).collect() } else { Vec::new() };
+                        value.into_iter().chain(formula)
+                    })
+                    .map(|b| fnv(&[&b]))
+                    .collect();
                 tokens.sort_unstable();
                 Item { key: label_key(&header.join("/")), tokens, shape: 0 }
             })
@@ -748,7 +757,9 @@ impl Aligned {
     }
 
     fn sheet_map(&self, renamed_to: Option<String>) -> SheetMap {
-        let axis = |a: &Axis, max: u32| AxisMap::new(a.pairs.clone(), a.moves.clone(), a.lone_base.clone(), max);
+        let axis = |a: &Axis, max: u32| {
+            AxisMap::new(a.pairs.clone(), a.moves.clone(), a.lone_base.clone(), a.lone_other.clone(), max)
+        };
         SheetMap { renamed_to, rows: axis(&self.rows, MAX_ROW), cols: axis(&self.cols, MAX_COL) }
     }
 }
@@ -791,7 +802,14 @@ enum FormulaDiff {
     /// Different text, but only by Excel's adjustment for the alignment.
     Adjusted,
     Changed {
+        /// The base formula adjusted, for display when it differs from
+        /// the base text.
         expected: Option<String>,
+        /// The adjusted base formula as it reads in the other cell,
+        /// position-free; part of what folding compares.
+        moved: Option<Vec<formula::Token>>,
+        base: Option<String>,
+        other: Option<String>,
     },
 }
 
@@ -804,22 +822,31 @@ fn diff_formulas(
     fn usable(f: Option<&Formula>) -> Option<&Formula> {
         f.filter(|f| f.kind != FormulaKind::DataTable && !f.text.is_empty())
     }
+    let text = |f: Option<&Formula>| f.map(|f| f.text.clone());
     match (usable(fb), usable(fo)) {
         (None, None) => FormulaDiff::Same,
-        (Some(_), None) | (None, Some(_)) => FormulaDiff::Changed { expected: None },
+        (b, o) if b.is_none() || o.is_none() => {
+            FormulaDiff::Changed { expected: None, moved: None, base: text(b), other: text(o) }
+        }
         (Some(fb), Some(fo)) => {
             let (tb, to) = (formula::tokenize(&fb.text), formula::tokenize(&fo.text));
-            if formula::same(&tb, &to) {
-                return FormulaDiff::Same;
-            }
+            // The adjusted base formula is what the other side should read.
             let moved = formula::remap(&tb, this, |name| maps.get(&name.to_lowercase()));
             if formula::same(&moved, &to) {
-                FormulaDiff::Adjusted
+                if formula::same(&tb, &to) { FormulaDiff::Same } else { FormulaDiff::Adjusted }
+            } else if formula::same(&tb, &to) && !formula::widens(&tb, &moved) {
+                // Unchanged text where the adjustment would only shrink or
+                // shift: a row edited in place can align as deleted plus
+                // inserted, so this is not evidence of a change. Unchanged
+                // text where Excel would have widened a range over inserted
+                // rows (a total no longer covering a new line) is reported.
+                FormulaDiff::Same
             } else {
                 let expected = (!formula::same(&moved, &tb)).then(|| formula::render(&moved));
-                FormulaDiff::Changed { expected }
+                FormulaDiff::Changed { expected, moved: Some(moved), base: text(Some(fb)), other: text(Some(fo)) }
             }
         }
+        _ => unreachable!("every combination is covered above"),
     }
 }
 
@@ -891,7 +918,11 @@ fn sheet_changes(
     let to_base: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).map(|&(b, o)| (o, b)).collect();
     let mut edits: Vec<FormulaEdit> = Vec::new();
     let mut adjusted = 0;
-    for (k, &(rb, ro)) in row_al.pairs.iter().chain(&row_al.moves).enumerate() {
+    // Moved rows get indexes far past the ordered pairs, so folding never
+    // treats the last paired row and the first moved row as neighbours.
+    let ordered = row_al.pairs.iter().enumerate();
+    let moved = row_al.moves.iter().enumerate().map(|(i, m)| (row_al.pairs.len() + 1 + 2 * i, m));
+    for (k, &(rb, ro)) in ordered.chain(moved) {
         let from_base = gb.row_cells(rb).iter().filter_map(|c| to_other.get(&c.col).map(|&co| (c.col, co)));
         let from_other = go
             .row_cells(ro)
@@ -905,29 +936,26 @@ fn sheet_changes(
             match diff_formulas(fb, fo, this, maps) {
                 FormulaDiff::Same => {}
                 FormulaDiff::Adjusted => adjusted += 1,
-                FormulaDiff::Changed { expected } => {
-                    let form = |f: Option<&Formula>, r: u32, c: u32| {
-                        f.map(|f| formula::relative_form(&formula::tokenize(&f.text), r, c)).unwrap_or_default()
+                FormulaDiff::Changed { expected, moved, base, other } => {
+                    let form = |f: &Option<String>, r: u32, c: u32| {
+                        f.as_deref().map(|f| formula::relative_form(&formula::tokenize(f), r, c)).unwrap_or_default()
                     };
-                    let expected_form = expected
-                        .as_deref()
-                        .map(|e| formula::relative_form(&formula::tokenize(e), ro, co))
-                        .unwrap_or_default();
+                    let moved_form = moved.as_deref().map(|m| formula::relative_form(m, ro, co)).unwrap_or_default();
                     edits.push(FormulaEdit {
                         rb,
                         cb,
                         ro,
                         co,
                         k,
-                        status: match (fb.is_some(), fo.is_some()) {
-                            (false, _) => Status::OnlyOther,
-                            (_, false) => Status::OnlyBase,
+                        status: match (&base, &other) {
+                            (None, _) => Status::OnlyOther,
+                            (_, None) => Status::OnlyBase,
                             _ => Status::Changed,
                         },
-                        base: fb.map(|f| f.text.clone()),
-                        other: fo.map(|f| f.text.clone()),
+                        shape: (form(&base, rb, cb), form(&other, ro, co), moved_form),
+                        base,
+                        other,
                         expected,
-                        shape: (form(fb, rb, cb), form(fo, ro, co), expected_form),
                     });
                 }
             }
@@ -965,9 +993,9 @@ fn sheet_changes(
     (changes, adjusted)
 }
 
-/// Folds formula edits that are the same change filled down a column (or
-/// across a row): neighbouring cells, in alignment order, whose base,
-/// other, and expected formulas have the same position-free form.
+/// Folds formula edits that are the same change filled down a column:
+/// neighbouring cells in alignment order whose base, other, and adjusted
+/// formulas have the same position-free form.
 fn fold_formula_edits(
     id: &str,
     mut edits: Vec<FormulaEdit>,
