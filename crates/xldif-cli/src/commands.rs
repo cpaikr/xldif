@@ -227,17 +227,19 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
     let s = &l.summary;
     let _ = writeln!(
         out,
-        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other; rows +{} -{} moved {}; columns +{} -{}; {} value change(s)",
+        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other, {} renamed; rows +{} -{} moved {}; columns +{} -{} moved {}; {} value change(s)",
         escape(&l.base.file),
         escape(&l.other.file),
         s.sheets_changed,
         s.sheets_only_base,
         s.sheets_only_other,
+        s.sheets_renamed,
         s.rows_only_other,
         s.rows_only_base,
         s.rows_moved,
         s.columns_only_other,
         s.columns_only_base,
+        s.columns_moved,
         s.value
     );
     for sheet in &l.sheets {

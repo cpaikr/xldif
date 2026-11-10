@@ -1,5 +1,6 @@
 //! Content-aligned comparison against synthetic workbooks: each alignment
 //! case in PLAN.md gives exactly the expected changes.
+#![allow(clippy::format_collect)]
 
 use xldif::diff::{AlignMode, Change, CompareOptions, Comparison, Filter, Kind, SheetComparison, Status, compare};
 use xldif::read_bytes;
@@ -209,4 +210,46 @@ fn ids_are_stable_across_filters() {
     let other: Grid = &[BS[0], BS[1], &["Cash", "101", "90"], BS[3], BS[4], BS[5]];
     let c = content(&[("BS", BS)], &[("BS", other)]);
     assert_eq!(sheet(&c, "BS").changes[0].id, "s0:value:B3:B3");
+}
+
+#[test]
+fn rows_without_values_still_match_themselves() {
+    // A formula with no cached result, and a cell holding an empty string.
+    let rows = r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Label</t></is></c></row>
+        <row r="2"><c r="B2"><f>A1&amp;"x"</f></c></row>
+        <row r="3"><c r="B3" t="inlineStr"><is><t></t></is></c></row>
+        <row r="4"><c r="A4"><v>4</v></c></row>"#;
+    let book = read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", rows).build()).unwrap();
+    let c = compare("a", &book, "b", &book, CompareOptions::default());
+    assert!(c.sheets[0].changes.is_empty(), "{:?}", c.sheets[0].changes);
+}
+
+#[test]
+fn alignment_runs_stop_at_moved_rows() {
+    let base: Grid =
+        &[&["a", "1"], &["b", "2", "x"], &["c", "3"], &["d", "4"], &["e", "5"], &["f", "6", "", "y"], &["g", "7"]];
+    let other: Grid =
+        &[&["a", "1"], &["f", "6", "", "y"], &["c", "3"], &["d", "4"], &["e", "5"], &["b", "2", "x"], &["g", "7"]];
+    let c = content(&[("S", base)], &[("S", other)]);
+    let al = sheet(&c, "S").alignment.clone().unwrap();
+    assert_eq!(al.row_moves, [[2, 6, 1], [6, 2, 1]]);
+    // No run may cover rows 2 or 6, which moved elsewhere.
+    for [b, o, len] in &al.rows {
+        assert!(!(*b..b + len).any(|r| r == 2 || r == 6), "{:?}", al.rows);
+        assert!(!(*o..o + len).any(|r| r == 2 || r == 6), "{:?}", al.rows);
+    }
+}
+
+#[test]
+fn sparse_sheets_compare_in_time_proportional_to_cells() {
+    // A diagonal: every row and column populated, one cell each.
+    let n = 3000;
+    let rows: String = (1..=n)
+        .map(|i| format!(r#"<row r="{i}"><c r="{}{i}"><v>{i}</v></c></row>"#, xldif::cellref::col_name(i)))
+        .collect();
+    let book = read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", &rows).build()).unwrap();
+    let start = std::time::Instant::now();
+    let c = compare("a", &book, "b", &book, CompareOptions { align: AlignMode::Position, ..CompareOptions::default() });
+    assert!(c.sheets[0].changes.is_empty());
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
 }

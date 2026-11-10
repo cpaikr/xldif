@@ -403,6 +403,15 @@ pub fn numeric_text(text: &str) -> Option<f64> {
     Some(if negative { -n } else { n } * scale)
 }
 
+/// What a cell contributes to alignment: its value and, when it has one,
+/// its formula. A cell with neither (formatting only, or an empty string)
+/// contributes nothing, so its row or column is not an item at all.
+fn cell_tokens(cell: &Cell) -> impl Iterator<Item = Vec<u8>> + '_ {
+    let formula =
+        cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| [b"f".as_slice(), f.text.as_bytes()].concat());
+    value_bytes(&cell.value).into_iter().chain(formula)
+}
+
 fn display_label(text: &str) -> String {
     let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() > 60 { collapsed.chars().take(60).collect::<String>() + "…" } else { collapsed }
@@ -435,14 +444,20 @@ struct Grid<'a> {
 
 impl<'a> Grid<'a> {
     fn new(sheet: &'a Sheet) -> Self {
-        let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(Cell::has_content)).collect();
+        let has_tokens = |c: &Cell| cell_tokens(c).next().is_some();
+        let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(has_tokens)).collect();
         let mut by_col: std::collections::BTreeMap<u32, Vec<(u32, &Cell)>> = std::collections::BTreeMap::new();
         for row in &rows {
-            for cell in row.cells.iter().filter(|c| value_bytes(&c.value).is_some()) {
+            for cell in row.cells.iter().filter(|c| has_tokens(c)) {
                 by_col.entry(cell.col).or_default().push((row.index, cell));
             }
         }
         Self { sheet, rows, cols: by_col.into_iter().collect() }
+    }
+
+    /// The written cells of one row, in column order.
+    fn row_cells(&self, row: u32) -> &'a [Cell] {
+        self.sheet.rows.binary_search_by_key(&row, |r| r.index).map_or(&[][..], |i| &self.sheet.rows[i].cells[..])
     }
 
     fn cell(&self, row: u32, col: u32) -> Option<&'a Cell> {
@@ -486,8 +501,7 @@ impl<'a> Grid<'a> {
             .map(|(_, cells)| {
                 let header: Vec<String> =
                     cells.iter().filter(|(r, _)| header_rows.contains(r)).filter_map(|(_, c)| header_text(c)).collect();
-                let mut tokens: Vec<u64> =
-                    cells.iter().filter_map(|(_, c)| value_bytes(&c.value)).map(|b| fnv(&[&b])).collect();
+                let mut tokens: Vec<u64> = cells.iter().flat_map(|(_, c)| cell_tokens(c)).map(|b| fnv(&[&b])).collect();
                 tokens.sort_unstable();
                 Item { key: label_key(&header.join("/")), tokens, shape: 0 }
             })
@@ -503,9 +517,12 @@ impl<'a> Grid<'a> {
                 let mut tokens = Vec::new();
                 let mut shape = Vec::new();
                 for c in &row.cells {
-                    let (Some(id), Some(bytes)) = (col_ids.get(&c.col), value_bytes(&c.value)) else { continue };
-                    tokens.push(fnv(&[&id.to_le_bytes(), &bytes]));
-                    shape.extend_from_slice(&id.to_le_bytes());
+                    let Some(id) = col_ids.get(&c.col) else { continue };
+                    let before = tokens.len();
+                    tokens.extend(cell_tokens(c).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])));
+                    if tokens.len() > before {
+                        shape.extend_from_slice(&id.to_le_bytes());
+                    }
                 }
                 tokens.sort_unstable();
                 // Cells arrive in column order, so the shape needs no sorting.
@@ -620,7 +637,16 @@ impl Axis {
     fn view_runs(&self) -> (Vec<Run>, Vec<Run>) {
         let mut moves: Vec<Run> = self.moves.iter().map(|&(b, o)| [b, o, 1]).collect();
         moves.sort_unstable();
-        (runs(&self.pairs, &self.lone_base, &self.lone_other), moves)
+        // A run must not span a moved item either, or it would map that
+        // number to itself as well as to where it moved.
+        let barrier = |lone: &[u32], moved: &mut dyn Iterator<Item = u32>| {
+            let mut all: Vec<u32> = lone.iter().copied().chain(moved).collect();
+            all.sort_unstable();
+            all
+        };
+        let base = barrier(&self.lone_base, &mut self.moves.iter().map(|m| m.0));
+        let other = barrier(&self.lone_other, &mut self.moves.iter().map(|m| m.1));
+        (runs(&self.pairs, &base, &other), moves)
     }
 }
 
@@ -682,9 +708,19 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
         changes.push(row_change(id, Status::Moved, Some(rb), Some(ro), label(&go, ro)));
     }
 
-    let col_pairs: Vec<(u32, u32)> = col_al.pairs.iter().chain(&col_al.moves).copied().collect();
+    // Visit populated cells only: a sparse sheet's paired rows times paired
+    // columns can be billions of empty combinations.
+    let to_other: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).copied().collect();
+    let to_base: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).map(|&(b, o)| (o, b)).collect();
     for &(rb, ro) in row_al.pairs.iter().chain(&row_al.moves) {
-        for &(cb, co) in &col_pairs {
+        let from_base = gb.row_cells(rb).iter().filter_map(|c| to_other.get(&c.col).map(|&co| (c.col, co)));
+        let from_other = go
+            .row_cells(ro)
+            .iter()
+            .filter_map(|c| to_base.get(&c.col).map(|&cb| (cb, c.col)))
+            .filter(|&(cb, _)| gb.cell(rb, cb).is_none());
+        let cols: Vec<(u32, u32)> = from_base.chain(from_other).collect();
+        for (cb, co) in cols {
             let vb = gb.cell(rb, cb).map_or(&Value::Empty, |c| &c.value);
             let vo = go.cell(ro, co).map_or(&Value::Empty, |c| &c.value);
             if same_value(vb, vo, options.tolerance) {

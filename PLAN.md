@@ -121,7 +121,7 @@ Commands:
   defined names, calculation settings, date system, and reader warnings.
 - `xldif compare BASE OTHER [--format json|text|html] [-o FILE] [--sheet NAME]
   [--kind KIND,...] [--limit N (default 500)] [--all] [--tolerance X]
-  [--align auto|position] [--force]`
+  [--align content|position] [--force]`
   - HTML requires `-o`. With `-o`, stdout carries a summary envelope.
   - `--all` also lists sheets that are the same.
   - It never overwrites either input, even with `--force`.
