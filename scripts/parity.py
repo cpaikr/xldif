@@ -37,10 +37,14 @@ from openpyxl.worksheet.formula import ArrayFormula, DataTableFormula
 
 
 def xldif(exe: str, *args: str) -> dict:
+    stage = args[0]
     proc = subprocess.run([exe, *args], capture_output=True)
-    env = json.loads(proc.stdout.decode("utf-8"))
+    try:
+        env = json.loads(proc.stdout.decode("utf-8"))
+    except ValueError:
+        raise RuntimeError(f"xldif {stage} exited {proc.returncode} without a JSON envelope") from None
     if not env["ok"]:
-        raise RuntimeError(env["error"]["code"])
+        raise RuntimeError(f"xldif {stage} failed with {env['error']['code']}")
     return env["result"]
 
 
@@ -82,8 +86,11 @@ def same_value(ours: dict, theirs, data_type: str, epoch) -> bool:
 
 def check_book(exe: str, path: str, label: str, show: bool, tally: Counter) -> None:
     info = xldif(exe, "inspect", path)
-    formulas = openpyxl.load_workbook(path, data_only=False, read_only=False)
-    values = openpyxl.load_workbook(path, data_only=True, read_only=False)
+    try:
+        formulas = openpyxl.load_workbook(path, data_only=False, read_only=False)
+        values = openpyxl.load_workbook(path, data_only=True, read_only=False)
+    except Exception as e:  # noqa: BLE001 - name the stage, keep the message private
+        raise RuntimeError(f"openpyxl could not load the book ({type(e).__name__})") from e
     epoch = values.epoch
     for sheet in info["sheets"]:
         if sheet["kind"] != "worksheet":
@@ -152,7 +159,9 @@ def main(argv: list[str]) -> int:
             check_book(exe, path, label, show, tally)
         except Exception as e:  # noqa: BLE001 - one unreadable book must not hide the rest
             failed_books += 1
-            print(f"  {label}: could not be compared ({type(e).__name__}: {e if show else 'details hidden'})")
+            # Messages above name only the stage and error code, never content.
+            detail = e if show or isinstance(e, RuntimeError) else "details hidden"
+            print(f"  {label}: could not be compared ({type(e).__name__}: {detail})")
     bad = sum(n for k, n in tally.items() if k != "agree" and not k.startswith("skipped"))
     summary = ", ".join(f"{k} {n}" for k, n in sorted(tally.items()))
     print(f"parity over {len(books)} book(s): {summary or 'no cells'}")

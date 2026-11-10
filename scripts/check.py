@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -83,16 +84,19 @@ def run_cargo() -> None:
             print(f"ok   cargo {args[0]}")
 
 
-def executable() -> Path:
-    """The debug `xldif` in Cargo's target directory, honoring CARGO_TARGET_DIR."""
+def target_dir() -> Path:
+    """Cargo's target directory, honoring CARGO_TARGET_DIR."""
     proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, capture_output=True)
-    target = Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
-    return target / "debug" / ("xldif.exe" if sys.platform == "win32" else "xldif")
+    return Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
+
+
+TARGET = target_dir()
+EXE = TARGET / "debug" / ("xldif.exe" if sys.platform == "win32" else "xldif")
 
 
 def cli_smoke() -> None:
     """The built executable honors the process contract outside the test harness."""
-    exe = executable()
+    exe = EXE
     if not exe.is_file():
         fail(f"{exe} is missing; cargo test builds it")
         return
@@ -124,7 +128,10 @@ def parity() -> None:
     if not have_openpyxl:
         fail("parity: openpyxl is not installed (pip install openpyxl)")
         return
-    fixtures = executable().parent.parent / "fixtures"
+    # A directory of xldif's own, emptied first, so no stale or foreign
+    # workbook from a shared target directory joins the run.
+    fixtures = TARGET / "xldif-parity-fixtures"
+    shutil.rmtree(fixtures, ignore_errors=True)
     proc = subprocess.run(
         ["cargo", "run", "-q", "--locked", "-p", "xldif-fixtures", "--example", "write_fixtures", "--", str(fixtures)],
         cwd=ROOT,
@@ -140,7 +147,7 @@ def parity() -> None:
     if private:
         runs.append((f"private corpus ({len(private)} workbooks)", [], private))
     for label, flags, books in runs:
-        proc = subprocess.run([sys.executable, "-I", script, *flags, str(executable()), *books])
+        proc = subprocess.run([sys.executable, "-I", script, *flags, str(EXE), *books])
         if proc.returncode != 0:
             fail(f"parity: {label}")
         else:

@@ -141,12 +141,16 @@ pub struct Cells {
     pub omitted: usize,
 }
 
+/// Sheet names quoted, since a name may itself contain a comma.
+pub fn quoted_names<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    names.map(|n| format!("{n:?}")).collect::<Vec<_>>().join(", ")
+}
+
 /// Looks a sheet up by exact name, listing the names when it is absent.
 pub fn find_sheet<'a>(book: &'a Workbook, name: &str) -> Result<&'a Sheet, Error> {
     book.sheet(name).ok_or_else(|| {
-        let names: Vec<&str> = book.sheets.iter().map(|s| s.name.as_str()).collect();
         Error::new(ErrorCode::InvalidArgument, format!("no sheet is named {name:?}"))
-            .with_hint(format!("sheets: {}", names.join(", ")))
+            .with_hint(format!("sheets: {}", quoted_names(book.sheets.iter().map(|s| s.name.as_str()))))
     })
 }
 

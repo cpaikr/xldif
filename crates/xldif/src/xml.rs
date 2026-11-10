@@ -113,6 +113,8 @@ impl<'a> Parser<'a> {
                         Event::Text(resolved.to_owned())
                     }
                 }
+                // A truncated part must not read as a complete, smaller one.
+                QEvent::Eof if self.depth > 0 => return Err(self.error("the part ends inside an open element")),
                 QEvent::Eof => Event::Eof,
                 // Declarations, comments, processing instructions, doctypes.
                 _ => continue,
@@ -290,6 +292,19 @@ mod tests {
         let mut p = Parser::new(xml, "test.xml");
         p.next().unwrap();
         assert_eq!(p.text_of("t", &["rPh"]).unwrap(), "rich text");
+    }
+
+    #[test]
+    fn a_truncated_part_is_an_error() {
+        let mut p = Parser::new("<worksheet><sheetData><row r=\"1\"><c><v>1</v></c>", "cut.xml");
+        let err = loop {
+            match p.next() {
+                Ok(Event::Eof) => panic!("truncation accepted"),
+                Ok(_) => {}
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(err.code, crate::ErrorCode::InvalidXml);
     }
 
     #[test]

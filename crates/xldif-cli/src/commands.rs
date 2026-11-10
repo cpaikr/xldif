@@ -61,7 +61,7 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
     let _ = writeln!(
         out,
         "{} ({:?}, {} dates, calculation {:?}{})",
-        i.file,
+        escape(&i.file),
         i.format,
         if i.date1904 { "1904" } else { "1900" },
         i.calculation.mode,
@@ -72,7 +72,7 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
             out,
             "{}\t{}\t{:?}\t{:?}\t{}\tcells {}\tformulas {}",
             s.index + 1,
-            s.name,
+            escape(&s.name),
             s.kind,
             s.visibility,
             s.used_range.as_deref().unwrap_or("-"),
@@ -81,19 +81,38 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
         );
     }
     for n in &i.defined_names {
-        let scope = n.scope.as_deref().unwrap_or("workbook");
-        let _ = writeln!(out, "name\t{}\t{scope}\t{}", n.name, n.refers_to);
+        let scope = escape(n.scope.as_deref().unwrap_or("workbook"));
+        let _ = writeln!(out, "name\t{}\t{scope}\t{}", escape(&n.name), escape(&n.refers_to));
     }
-    for w in warnings {
-        let _ = writeln!(out, "warning\t{}\t{}", w.code, w.message);
-    }
+    write_warnings(&mut out, warnings);
     out
 }
 
-/// One line per cell: text is escaped so tabs, line breaks, and
-/// backslashes inside values and formulas cannot split or blur a line.
+fn write_warnings(out: &mut String, warnings: &[Warning]) {
+    for w in warnings {
+        let _ = writeln!(out, "warning\t{}\t{}", w.code, escape(&w.message));
+    }
+}
+
+/// Text from a workbook, made safe for a one-record-per-line listing in a
+/// terminal: backslashes, tabs, and line breaks are escaped so they cannot
+/// split or blur a line, and every other control character (such as ESC,
+/// which could start a terminal escape sequence) is shown as `\u{..}`.
 fn escape(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r")
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => {
+                let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn cells_text(c: &Cells, warnings: &[Warning]) -> String {
@@ -117,8 +136,6 @@ fn cells_text(c: &Cells, warnings: &[Warning]) -> String {
     if c.omitted > 0 {
         let _ = writeln!(out, "... {} more cells (raise --limit, or 0 for all)", c.omitted);
     }
-    for w in warnings {
-        let _ = writeln!(out, "warning\t{}\t{}", w.code, w.message);
-    }
+    write_warnings(&mut out, warnings);
     out
 }

@@ -186,7 +186,7 @@ fn reading_failures_have_stable_codes() {
     let work = Work::new();
     let book = work.basic();
     let env = failure(&xldif(["cells", s(&book), "--sheet", "Nope"]), "invalid_argument");
-    assert!(env["error"]["hint"].as_str().unwrap().contains("BS, Notes"));
+    assert!(env["error"]["hint"].as_str().unwrap().contains(r#""BS", "Notes""#));
     failure(&xldif(["cells", s(&book), "--sheet", "BS", "--range", "B0"]), "invalid_argument");
     failure(&xldif(["inspect", s(&work.0.join("missing.xlsx"))]), "file_not_found");
     failure(&xldif(["inspect", s(&work.0)]), "file_not_found");
@@ -201,12 +201,14 @@ fn reading_failures_have_stable_codes() {
 fn cells_text_escapes_and_always_prints_a_document() {
     let work = Work::new();
     let rows = r#"<row r="1"><c r="A1" t="str"><f>LET(x,1,
-x)</f><v>a\b</v></c><c r="B1" t="s"><v>9</v></c></row>"#;
+x)</f><v>a\b</v></c><c r="B1" t="s"><v>9</v></c></row><row r="2"><c r="A2" t="inlineStr"><is><t>_x001B_[31mred</t></is></c></row>"#;
     let book = work.file("odd.xlsx", &xldif_fixtures::raw::RawBook::new().sheet("S", rows).sheet("E", "").build());
     let run = xldif(["cells", s(&book), "--sheet", "S", "--format", "text"]);
     assert_eq!(run.code, 0);
     let lines: Vec<&str> = run.stdout.lines().collect();
     assert_eq!(lines[0], r"A1	text	a\\b	=LET(x,1,\nx)");
+    // ESC would start a terminal escape sequence; it is shown, not sent.
+    assert_eq!(lines[2], r"A2	text	\u{1b}[31mred");
     assert!(lines.iter().any(|l| l.starts_with("warning\tunreadable_value")), "{}", run.stdout);
     let empty = xldif(["cells", s(&book), "--sheet", "E", "--format", "text"]);
     // Workbook warnings follow, whichever sheet is listed.
