@@ -1,6 +1,6 @@
 //! Hostile and unusual input: every bound fails with `invalid_archive`, and
 //! shapes outside a normal workbook fail or warn instead of reading wrong.
-#![allow(clippy::format_collect)]
+#![allow(clippy::format_collect, clippy::format_push_string)]
 
 use std::sync::Arc;
 
@@ -120,4 +120,17 @@ fn macro_sheets_are_read() {
     // The fixture links the part as a worksheet; the root element is what matters.
     assert_eq!(book.sheets[0].kind, SheetKind::Worksheet);
     assert_eq!(book.sheets[0].cells().count(), 1);
+}
+
+#[test]
+fn expanded_shared_formula_text_is_bounded() {
+    let long = "1".repeat(200);
+    let mut rows = format!(r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A50" si="0">{long}+B1</f><v>1</v></c></row>"#);
+    for r in 2..=50 {
+        rows.push_str(&format!(r#"<row r="{r}"><c r="A{r}"><f t="shared" si="0"/><v>1</v></c></row>"#));
+    }
+    let book = RawBook::new().sheet("S", &rows).build();
+    let tight = Limits { max_formula_bytes: 5_000, ..Limits::default() };
+    assert_eq!(code(read_bytes_with(book.clone(), &tight)), ErrorCode::InvalidArchive);
+    assert!(read_bytes(book).is_ok());
 }

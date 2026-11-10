@@ -6,9 +6,9 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** milestone M1 done. `compare` reports value changes and
-inserted, deleted, and moved rows, columns, and sheets. Formula,
-formatting, and object comparison and the HTML report come next. See
+**Status:** milestones M1 and M2 done. `compare` reports value and formula
+changes and inserted, deleted, and moved rows, columns, and sheets.
+Formatting and object comparison and the HTML report come next. See
 [PLAN.md](PLAN.md).
 
 ## Commands
@@ -16,12 +16,15 @@ formatting, and object comparison and the HTML report come next. See
 - `xldif inspect BOOK` shows sheets (kind, visibility, used range, cell and
   formula counts), defined names, calculation settings, and the date system.
   It prints no cell contents.
-- `xldif compare BASE OTHER [--sheet NAME] [--kind value,row,column]
+- `xldif compare BASE OTHER [--sheet NAME] [--kind value,formula,row,column]
   [--limit N] [--all] [--tolerance X] [--align content|position]` reports
   what changed. Rows and columns pair by their labels and values, so an
   inserted row is one `row` change; each change has a stable id, base and
   other locations, a numeric delta (also for numbers stored as text), and
-  inferred row and column labels.
+  inferred row and column labels. Formulas are compared after Excel's own
+  adjustment for inserted and deleted rows, so `=D30` becoming `=D31` under
+  an inserted row is not a change, while a rewrite shows both formulas and
+  the one Excel would have kept (`expected`).
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
   with a value or formula: address, type, stored value, and formula text.
 

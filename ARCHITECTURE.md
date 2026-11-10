@@ -25,12 +25,15 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   - [views.rs](crates/xldif/src/views.rs): `inspect` and `cells` results;
   - [align.rs](crates/xldif/src/align.rs): sequence alignment of rows or
     columns (key anchors, similarity in the gaps, moves);
+  - [formula.rs](crates/xldif/src/formula.rs): formula tokens, shifting
+    (shared formulas), remapping through an alignment, and position-free
+    forms for folding;
   - [diff.rs](crates/xldif/src/diff.rs): sheet pairing, column-then-row
-    alignment, value changes, labels, and the `compare` listing;
+    alignment, value and formula changes, labels, folding, and the
+    `compare` listing;
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
-  Formula comparison, formatting, objects, and the HTML report arrive with
-  M2–M4 (see PLAN.md › Architecture).
+  Formatting, objects, and the HTML report arrive with M3–M4 (see PLAN.md › Architecture).
 - [`crates/xldif-cli`](crates/xldif-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document
   ([envelope.rs](crates/xldif-cli/src/envelope.rs)).
@@ -83,6 +86,9 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`scripts/parity.py`](scripts/parity.py) compares every cell's value and
   formula with openpyxl, an independent reader, and counts the known,
   intended differences it skips.
+- [`crates/xldif/tests/formulas.rs`](crates/xldif/tests/formulas.rs) covers
+  formulas adjusted by inserted rows and by other sheets' rows, renamed
+  sheets, rewrites with `expected`, formulas replaced by values, and folding.
 - [`crates/xldif/tests/compare.rs`](crates/xldif/tests/compare.rs) covers each
   alignment case: inserted, deleted, and moved rows; an inserted column with
   inserted rows; spacer rows; renumbered labels; renamed and moved sheets;

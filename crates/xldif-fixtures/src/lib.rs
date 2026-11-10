@@ -62,8 +62,9 @@ pub fn edge_cases() -> Vec<u8> {
 }
 
 /// A workbook from text grids, one per sheet: a cell that parses as a
-/// number is written as one, an empty string leaves the cell blank, and
-/// anything else is text. Row 1 of the grid is sheet row 1.
+/// number is written as one, `=FORMULA|result` is a formula with its cached
+/// result, an empty string leaves the cell blank, and anything else is
+/// text. Row 1 of the grid is sheet row 1.
 pub fn grid_book(sheets: &[(&str, &[&[&str]])]) -> Vec<u8> {
     let mut book = Workbook::new();
     for (name, rows) in sheets {
@@ -72,6 +73,11 @@ pub fn grid_book(sheets: &[(&str, &[&[&str]])]) -> Vec<u8> {
             for (c, text) in row.iter().enumerate() {
                 let (r, c) = (r as u32, c as u16);
                 if text.is_empty() {
+                    continue;
+                }
+                if text.starts_with('=') {
+                    let (expression, result) = text.split_once('|').unwrap_or((text, "0"));
+                    sheet.write_formula(r, c, formula(expression, result)).expect("cell in range");
                     continue;
                 }
                 match text.parse::<f64>() {

@@ -8,6 +8,7 @@ pub mod align;
 pub mod cellref;
 pub mod diff;
 mod error;
+pub mod formula;
 pub mod model;
 mod package;
 pub mod reader;

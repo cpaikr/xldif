@@ -88,7 +88,8 @@ fn shared_and_array_formulas_keep_their_anchor_data() {
         (FormulaKind::Shared, Some(0), Some("A1:A3"))
     );
     let follower = cell(&book, "S", 2, 1).formula.clone().unwrap();
-    assert_eq!((follower.kind, follower.text.as_str(), follower.shared_index), (FormulaKind::Shared, "", Some(0)));
+    // Cells after the anchor read as the anchor's formula shifted to them.
+    assert_eq!((follower.kind, follower.text.as_str(), follower.shared_index), (FormulaKind::Shared, "B2*2", Some(0)));
     let array = cell(&book, "S", 5, 3).formula.clone().unwrap();
     assert_eq!((array.kind, array.range.as_deref()), (FormulaKind::Array, Some("C5:C6")));
     // Cells inside an array range hold values only.
