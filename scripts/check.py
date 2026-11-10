@@ -194,6 +194,20 @@ def compare_smoke() -> None:
             failed += 1
         elif any(ab["summary"][k] != ba["summary"][v] for k, v in mirror.items()):
             asymmetric += 1
+    # Every version pair also renders as an HTML report (written to the
+    # target directory, never printed).
+    reports = TARGET / "xldif-corpus-reports"
+    shutil.rmtree(reports, ignore_errors=True)
+    reports.mkdir(parents=True)
+    html_failed = 0
+    for k, (a, b) in enumerate(pairs):
+        out = reports / f"pair-{k}.html"
+        proc = subprocess.run([str(EXE), "compare", str(a), str(b), "--format", "html", "-o", str(out)], capture_output=True)
+        if proc.returncode != 0 or not out.is_file() or b"<script src" in out.read_bytes():
+            html_failed += 1
+    shutil.rmtree(reports, ignore_errors=True)
+    if html_failed:
+        fail(f"compare smoke: {html_failed} of {len(pairs)} HTML report(s) failed")
     if failed:
         fail(f"compare smoke: {failed} of {len(pairs)} version pair(s) failed to compare")
     if len(errors) == before:

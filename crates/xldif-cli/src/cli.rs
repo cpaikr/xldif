@@ -69,6 +69,14 @@ pub enum Format {
     Text,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CompareFormat {
+    Json,
+    Text,
+    /// A self-contained side-by-side report; needs -o.
+    Html,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Workbook structure without cell contents: sheets, kinds, visibility,
@@ -91,6 +99,7 @@ pub enum Command {
   xldif compare v1.xlsx v2.xlsx
   xldif compare v1.xlsx v2.xlsx --sheet BS --kind value --format text
   xldif compare v1.xlsx v2.xlsx --limit 0 --tolerance 0.005
+  xldif compare v1.xlsx v2.xlsx --format html -o report.html
 
 Reading the result:
   summary counts every change; `listed` and `omitted` say what the filters and
@@ -126,8 +135,15 @@ Reading the result:
         tolerance: f64,
         #[arg(long, value_enum, default_value_t = Align::Content)]
         align: Align,
-        #[arg(long, value_enum, default_value_t = Format::Json)]
-        format: Format,
+        #[arg(long, value_enum, default_value_t = CompareFormat::Json)]
+        format: CompareFormat,
+        /// Write the report here (required for html); stdout then carries a
+        /// summary envelope.
+        #[arg(short = 'o', long)]
+        output: Option<PathBuf>,
+        /// Replace an existing output file (never a compared workbook).
+        #[arg(long)]
+        force: bool,
     },
     /// Cells with a value or formula, row by row: address, type, stored
     /// value, and formula text.

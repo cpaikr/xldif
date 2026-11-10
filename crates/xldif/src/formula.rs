@@ -618,14 +618,21 @@ impl AxisMap {
         offset(o1, i64::from(index) + 1, self.max)
     }
 
+    /// A range corner: like [`map`](Self::map), but a row that moved
+    /// elsewhere leaves the range as a deleted one does, rather than
+    /// dragging the corner to where it went.
+    fn corner(&self, n: u32) -> Option<u32> {
+        if self.moves.binary_search_by_key(&n, |m| m.0).is_ok() { None } else { self.map(n) }
+    }
+
     /// The first surviving number at or after `n`, up to `limit`, mapped.
     fn map_forward(&self, n: u32, limit: u32) -> Option<u32> {
-        (n..=limit).take(self.deleted.len() + 1).find_map(|k| self.map(k))
+        (n..=limit).take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
     }
 
     /// The last surviving number at or before `n`, down to `limit`, mapped.
     fn map_backward(&self, n: u32, limit: u32) -> Option<u32> {
-        (limit..=n).rev().take(self.deleted.len() + 1).find_map(|k| self.map(k))
+        (limit..=n).rev().take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
     }
 }
 

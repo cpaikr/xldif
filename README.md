@@ -10,7 +10,8 @@ No Excel installation is needed.
 format changes; inserted, deleted, and moved rows, columns, and sheets;
 row and column layout; and merges, comments, data validation, conditional
 formatting, hyperlinks, sheet visibility, defined names, and the theme.
-The HTML report comes next. See
+`--format html -o report.html` writes a self-contained side-by-side
+report for people. The agent skill and releases come next. See
 [PLAN.md](PLAN.md).
 
 ## Commands
@@ -26,7 +27,9 @@ The HTML report comes next. See
   inferred row and column labels. Formulas are compared after Excel's own
   adjustment for inserted and deleted rows, so `=D30` becoming `=D31` under
   an inserted row is not a change, while a rewrite shows both formulas and
-  the one Excel would have kept (`expected`).
+  the one Excel would have kept (`expected`). `--format html -o FILE`
+  writes the side-by-side report instead (it never replaces a compared
+  workbook, and replaces another file only with `--force`).
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
   with a value or formula: address, type, stored value, and formula text.
 

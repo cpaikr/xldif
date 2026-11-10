@@ -300,3 +300,39 @@ fn compare_reports_formula_changes_in_json_and_text() {
     let text = xldif(["compare", s(&base), s(&other), "--kind", "formula", "--format", "text"]);
     assert!(text.stdout.contains("formula	changed	B4→B4	=B2-B3 → =B2+B3	Net | 2025"), "{}", text.stdout);
 }
+
+#[test]
+fn compare_writes_a_self_contained_html_report() {
+    let work = Work::new();
+    let grid =
+        |v: &str| xldif_fixtures::grid_book(&[("BS", &[&["Account", "2025"], &["<script>alert(1)</script>", v]])]);
+    let base = work.file("v1.xlsx", &grid("1"));
+    let other = work.file("v2.xlsx", &grid("2"));
+    let report = work.0.join("report.html");
+
+    let run = xldif(["compare", s(&base), s(&other), "--format", "html"]);
+    assert_eq!(envelope(&failure_run(run))["error"]["code"], "invalid_argument");
+
+    let env = ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]), "compare");
+    assert_eq!(env["result"]["summary"]["value"], 1);
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    // Self-contained: no external scripts, styles, images, or fonts.
+    for needle in ["<script src", "<link", "<img", "url(http", "@import"] {
+        assert!(!html.contains(needle), "{needle}");
+    }
+    // Workbook text never becomes markup, even inside the embedded data.
+    assert!(!html.contains("<script>alert(1)"));
+
+    let again = xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]);
+    assert_eq!(envelope(&failure_run(again))["error"]["code"], "output_exists");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--force"]), "compare");
+    let over_input = xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&base), "--force"]);
+    assert_eq!(envelope(&failure_run(over_input))["error"]["code"], "output_exists");
+    assert!(std::fs::read(&base).unwrap().starts_with(b"PK"), "the input is untouched");
+}
+
+fn failure_run(run: Run) -> Run {
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    run
+}

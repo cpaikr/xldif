@@ -9,7 +9,7 @@ use xldif::diff::{self, AlignMode, Change, CompareOptions, Filter, Listing, Loca
 use xldif::views::{self, Cells, Inspection, JsonValue};
 use xldif::{Error, ErrorCode};
 
-use crate::cli::{Align, Command, Format, Kind};
+use crate::cli::{Align, Command, CompareFormat, Format, Kind};
 use crate::envelope::{Failure, Warning};
 
 pub enum Output {
@@ -36,7 +36,12 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 Format::Text => Output::Text(inspect_text(&inspection, &warnings)),
             })
         }
-        Command::Compare { base, other, sheet, kind, limit, all, tolerance, align, format } => {
+        Command::Compare { base, other, sheet, kind, limit, all, tolerance, align, format, output, force } => {
+            if format == CompareFormat::Html && output.is_none() {
+                return Err(Error::new(ErrorCode::InvalidArgument, "--format html needs -o FILE")
+                    .with_hint("for example: xldif compare a.xlsx b.xlsx --format html -o report.html")
+                    .into());
+            }
             if !(tolerance >= 0.0 && tolerance.is_finite()) {
                 return Err(
                     Error::new(ErrorCode::InvalidArgument, "--tolerance must be a finite number of 0 or more").into()
@@ -83,11 +88,44 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     Kind::Column => diff::Kind::Column,
                 })
                 .collect();
+            if format == CompareFormat::Html {
+                // The report shows every change and every sheet; a limit would
+                // silently hide changes from a reader who cannot see it.
+                let listing = comparison.list(&Filter { sheet, kinds, limit: None, all: true });
+                let html = xldif::html::render_html(&listing, &b, &o);
+                let path = output.expect("checked above");
+                write_output(&path, html.as_bytes(), &[&base, &other], force)?;
+                let result = serde_json::json!({
+                    "written": path.display().to_string(),
+                    "bytes": html.len(),
+                    "summary": listing.summary,
+                    "listed": listing.listed,
+                });
+                return Ok(Output::Json { result, warnings });
+            }
             let listing = comparison.list(&Filter { sheet, kinds, limit: (limit > 0).then_some(limit), all });
-            Ok(match format {
-                Format::Json => Output::Json { result: json(&listing), warnings },
-                Format::Text => Output::Text(compare_text(&listing, &warnings)),
-            })
+            let rendered = match format {
+                CompareFormat::Text => Output::Text(compare_text(&listing, &warnings)),
+                _ => Output::Json { result: json(&listing), warnings },
+            };
+            match (output, rendered) {
+                (None, rendered) => Ok(rendered),
+                (Some(path), Output::Text(text)) => {
+                    write_output(&path, text.as_bytes(), &[&base, &other], force)?;
+                    Ok(Output::Json {
+                        result: serde_json::json!({"written": path.display().to_string(), "bytes": text.len()}),
+                        warnings: Vec::new(),
+                    })
+                }
+                (Some(path), Output::Json { result, warnings }) => {
+                    let text = serde_json::to_string_pretty(&result).expect("JSON values always serialize");
+                    write_output(&path, text.as_bytes(), &[&base, &other], force)?;
+                    Ok(Output::Json {
+                        result: serde_json::json!({"written": path.display().to_string(), "bytes": text.len()}),
+                        warnings,
+                    })
+                }
+            }
         }
         Command::Cells { book, sheet, range, limit, format } => {
             let range = range
@@ -108,6 +146,33 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             })
         }
     }
+}
+
+/// Writes a report through a temporary file and a rename, refusing to
+/// replace a compared workbook at all and any other file without --force.
+fn write_output(path: &Path, bytes: &[u8], inputs: &[&Path], force: bool) -> Result<(), Failure> {
+    let same_file = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    };
+    if inputs.iter().any(|input| same_file(path, input)) {
+        return Err(Error::new(ErrorCode::OutputExists, "refusing to write the report over a compared workbook").into());
+    }
+    if path.exists() && !force {
+        return Err(Error::new(ErrorCode::OutputExists, format!("{} already exists", path.display()))
+            .with_hint("pass --force to replace it")
+            .into());
+    }
+    let io =
+        |e: std::io::Error| Failure::from(Error::new(ErrorCode::IoError, format!("writing {}: {e}", path.display())));
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".xldif-tmp");
+    let temp = std::path::PathBuf::from(temp);
+    std::fs::write(&temp, bytes).map_err(io)?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(io)?;
+    }
+    std::fs::rename(&temp, path).map_err(io)
 }
 
 fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
