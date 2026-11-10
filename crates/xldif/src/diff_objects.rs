@@ -46,12 +46,11 @@ fn effective_style(sheet: &Sheet, row: u32, col: u32) -> u32 {
     line_at(&sheet.layout.cols, col).and_then(|l| l.style).unwrap_or(0)
 }
 
-/// The record covering `n`. Records are sorted by first line (the reader
-/// keeps file order, which Excel writes ascending); a binary search finds
-/// the last record starting at or before `n`.
+/// The record covering `n`: the reader leaves records sorted and disjoint,
+/// so it is the last one starting at or before `n`, if it reaches `n`.
 fn line_at(records: &[LineProps], n: u32) -> Option<&LineProps> {
     let k = records.partition_point(|l| l.index <= n);
-    records[..k].iter().rev().take(2).find(|l| (l.index..=l.last).contains(&n))
+    k.checked_sub(1).map(|k| &records[k]).filter(|l| l.last >= n)
 }
 
 /// Property changes between two styles: `(property, base, other)`.
@@ -164,25 +163,18 @@ fn layout_changes(
     } else {
         (&b.sheet.layout.cols, &o.sheet.layout.cols)
     };
-    let sorted = |v: &[LineProps]| {
-        let mut v = v.to_vec();
-        v.sort_by_key(|l| l.index);
-        v
-    };
-    let (base, other) = (sorted(base), sorted(other));
-    // Distinct lines named by any record: at most the grid's extent.
-    let lines = |records: &[LineProps]| -> std::collections::BTreeSet<u32> {
-        records.iter().flat_map(|l| l.index..=l.last).collect()
-    };
+    // Lines named by any record, in order; the records are disjoint, so
+    // these are at most the grid's extent.
+    let lines = |records: &[LineProps]| -> Vec<u32> { records.iter().flat_map(|l| l.index..=l.last).collect() };
     let mut pairs: Vec<(u32, u32)> = Vec::new();
     let mut seen = HashSet::new();
-    for nb in lines(&base) {
+    for nb in lines(base) {
         if let Some(no) = fwd.map(nb) {
             seen.insert(no);
             pairs.push((no, nb));
         }
     }
-    for no in lines(&other) {
+    for no in lines(other) {
         if !seen.contains(&no)
             && let Some(nb) = inv.map(no)
         {
@@ -195,7 +187,7 @@ fn layout_changes(
     let mut style_cache: HashMap<(u32, u32), Vec<Property>> = HashMap::new();
     let mut out: Vec<(u32, u32, u32, u32, Vec<Property>)> = Vec::new();
     for (no, nb) in pairs {
-        let (lb, lo) = (line_at(&base, nb), line_at(&other, no));
+        let (lb, lo) = (line_at(base, nb), line_at(other, no));
         let size = |l: Option<&LineProps>| l.and_then(|l| l.size.clone());
         let hidden = |l: Option<&LineProps>| l.is_some_and(|l| l.hidden);
         let style = |l: Option<&LineProps>| l.and_then(|l| l.style).unwrap_or(0);
