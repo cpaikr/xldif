@@ -76,15 +76,62 @@ impl Status {
 pub enum Kind {
     Value,
     Formula,
+    Format,
     Row,
     Column,
+    Merge,
+    Comment,
+    Validation,
+    ConditionalFormat,
+    Hyperlink,
+    Sheet,
+    Name,
+    Theme,
 }
 
 impl Kind {
-    pub const ALL: [Self; 4] = [Self::Value, Self::Formula, Self::Row, Self::Column];
+    pub const ALL: [Self; 13] = [
+        Self::Value,
+        Self::Formula,
+        Self::Format,
+        Self::Row,
+        Self::Column,
+        Self::Merge,
+        Self::Comment,
+        Self::Validation,
+        Self::ConditionalFormat,
+        Self::Hyperlink,
+        Self::Sheet,
+        Self::Name,
+        Self::Theme,
+    ];
+
+    /// Kinds that are workbook objects rather than cells, rows, or columns.
+    pub const fn is_object(self) -> bool {
+        matches!(
+            self,
+            Self::Merge
+                | Self::Comment
+                | Self::Validation
+                | Self::ConditionalFormat
+                | Self::Hyperlink
+                | Self::Sheet
+                | Self::Name
+                | Self::Theme
+        )
+    }
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Format => "format",
+            Self::Merge => "merge",
+            Self::Comment => "comment",
+            Self::Validation => "validation",
+            Self::ConditionalFormat => "conditionalFormat",
+            Self::Hyperlink => "hyperlink",
+            Self::Sheet => "sheet",
+            Self::Name => "name",
+            Self::Theme => "theme",
             Self::Value => "value",
             Self::Formula => "formula",
             Self::Row => "row",
@@ -113,6 +160,18 @@ pub struct Location {
     /// its first cell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
+    /// An object's content: a comment's text, a rule, a link target, a
+    /// defined name's reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// One property that differs, as `base` and `other` show it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Property {
+    pub name: String,
+    pub base: String,
+    pub other: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -152,6 +211,9 @@ pub struct Change {
     pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Labels>,
+    /// For a format, layout, or object change: what differs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<Property>,
 }
 
 /// `[base start, other start, length]`.
@@ -220,6 +282,11 @@ pub struct Summary {
     /// Formulas whose text differs only because Excel adjusted them for
     /// inserted or deleted rows and columns; not listed.
     pub formulas_adjusted: usize,
+    /// Format changes, counting a folded block once.
+    pub format: usize,
+    /// Merges, comments, validation, conditional formats, hyperlinks, sheet
+    /// visibility, defined names, and the theme.
+    pub objects: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -229,6 +296,8 @@ pub struct Comparison {
     pub other: Side,
     pub summary: Summary,
     pub sheets: Vec<SheetComparison>,
+    /// Workbook-level changes: defined names and the theme.
+    pub objects: Vec<Change>,
     #[serde(skip)]
     pub warnings: Vec<Warning>,
 }
@@ -287,8 +356,14 @@ pub fn compare(
         paired_other[*oi] = true;
         let o = &other.sheets[*oi];
         let this = &maps[&b.name.to_lowercase()];
-        let (changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &maps, options);
+        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &maps, options);
         adjusted += n_adjusted;
+        let (bs, os) = (
+            crate::diff_objects::Side { sheet: b, styles: &base.styles },
+            crate::diff_objects::Side { sheet: o, styles: &other.styles },
+        );
+        changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, &al.inverse_map()));
+        changes.sort_by_key(order_key);
         if al.fell_back {
             warnings.push(Warning {
                 code: "alignment_fallback",
@@ -317,15 +392,97 @@ pub fn compare(
             sheets.push(lone_sheet(id, Status::OnlyOther, &o.name));
         }
     }
+    let objects = workbook_objects(base, other, &maps);
     let mut summary = summarize(&sheets);
     summary.formulas_adjusted = adjusted;
+    summary.objects += objects.len();
     Comparison {
         base: Side { file: base_file.to_owned(), sheets: base.sheets.len(), date1904: base.date1904 },
         other: Side { file: other_file.to_owned(), sheets: other.sheets.len(), date1904: other.date1904 },
         summary,
         sheets,
+        objects,
         warnings,
     }
+}
+
+/// Defined names (compared by name and scope, their references carried
+/// through the alignments like formulas) and the theme.
+fn workbook_objects(base: &Workbook, other: &Workbook, maps: &HashMap<String, SheetMap>) -> Vec<Change> {
+    let blank = || Change {
+        id: String::new(),
+        kind: Kind::Name,
+        status: Status::Changed,
+        base: None,
+        other: None,
+        delta: None,
+        expected: None,
+        labels: None,
+        properties: Vec::new(),
+    };
+    let scope_key = |scope: &Option<String>, renames: bool| -> String {
+        let s = scope.clone().unwrap_or_default().to_lowercase();
+        if renames { maps.get(&s).and_then(|m| m.renamed_to.clone()).map_or(s, |r| r.to_lowercase()) } else { s }
+    };
+    let key = |n: &crate::model::DefinedName, renames: bool| (n.name.to_lowercase(), scope_key(&n.scope, renames));
+    let label = |n: &crate::model::DefinedName| match &n.scope {
+        Some(scope) => format!("{scope}!{}", n.name),
+        None => n.name.clone(),
+    };
+    let other_names: HashMap<(String, String), &crate::model::DefinedName> =
+        other.defined_names.iter().map(|n| (key(n, false), n)).collect();
+    let workbook_scope =
+        SheetMap { renamed_to: None, rows: AxisMap::identity(MAX_ROW), cols: AxisMap::identity(MAX_COL) };
+    let mut out = Vec::new();
+    let mut matched = HashSet::new();
+    for n in &base.defined_names {
+        let k = key(n, true);
+        let loc = |d: &crate::model::DefinedName| Location { text: Some(d.refers_to.clone()), ..Location::default() };
+        match other_names.get(&k) {
+            Some(o) => {
+                matched.insert(k.clone());
+                let (tb, to) = (formula::tokenize(&n.refers_to), formula::tokenize(&o.refers_to));
+                let moved = formula::remap(&tb, &workbook_scope, |s| maps.get(&s.to_lowercase()));
+                if !formula::same(&moved, &to) {
+                    out.push(Change {
+                        id: format!("name:{}", label(n)),
+                        base: Some(loc(n)),
+                        other: Some(loc(o)),
+                        expected: (!formula::same(&moved, &tb)).then(|| formula::render(&moved)),
+                        properties: vec![Property {
+                            name: "refersTo".into(),
+                            base: n.refers_to.clone(),
+                            other: o.refers_to.clone(),
+                        }],
+                        ..blank()
+                    });
+                }
+            }
+            None => out.push(Change {
+                id: format!("name:{}", label(n)),
+                status: Status::OnlyBase,
+                base: Some(loc(n)),
+                ..blank()
+            }),
+        }
+    }
+    for o in &other.defined_names {
+        if !matched.contains(&key(o, false)) {
+            let loc = Location { text: Some(o.refers_to.clone()), ..Location::default() };
+            out.push(Change {
+                id: format!("name:{}", label(o)),
+                status: Status::OnlyOther,
+                other: Some(loc),
+                ..blank()
+            });
+        }
+    }
+    if let (Some(a), Some(b)) = (base.theme, other.theme)
+        && a != b
+    {
+        out.push(Change { id: "theme".into(), kind: Kind::Theme, ..blank() });
+    }
+    out
 }
 
 fn lone_sheet(id: String, status: Status, name: &str) -> SheetComparison {
@@ -348,6 +505,8 @@ fn summarize(sheets: &[SheetComparison]) -> Summary {
             match (c.kind, c.status) {
                 (Kind::Value, _) => s.value += 1,
                 (Kind::Formula, _) => s.formula += 1,
+                (Kind::Format, _) => s.format += 1,
+                (k, _) if k.is_object() => s.objects += 1,
                 (Kind::Row, Status::OnlyBase) => s.rows_only_base += 1,
                 (Kind::Row, Status::OnlyOther) => s.rows_only_other += 1,
                 (Kind::Row, Status::Moved) => s.rows_moved += 1,
@@ -762,6 +921,15 @@ impl Aligned {
         };
         SheetMap { renamed_to, rows: axis(&self.rows, MAX_ROW), cols: axis(&self.cols, MAX_COL) }
     }
+
+    /// The map from the other side back to the base side.
+    fn inverse_map(&self) -> SheetMap {
+        let flip = |v: &[(u32, u32)]| v.iter().map(|&(b, o)| (o, b)).collect::<Vec<_>>();
+        let axis = |a: &Axis, max: u32| {
+            AxisMap::new(flip(&a.pairs), flip(&a.moves), a.lone_other.clone(), a.lone_base.clone(), max)
+        };
+        SheetMap { renamed_to: None, rows: axis(&self.rows, MAX_ROW), cols: axis(&self.cols, MAX_COL) }
+    }
 }
 
 fn align_grids(gb: &Grid, go: &Grid, options: CompareOptions) -> Aligned {
@@ -992,6 +1160,7 @@ fn sheet_changes(
                 delta,
                 expected: None,
                 labels: Some(labels_for(rb, cb, ro, co)),
+                properties: Vec::new(),
             });
         }
     }
@@ -1060,6 +1229,7 @@ fn fold_formula_edits(
             delta: None,
             expected: first.expected.clone(),
             labels: Some(labels_for(first.rb, first.cb, first.ro, first.co)),
+            properties: Vec::new(),
         });
     }
     out
@@ -1089,6 +1259,7 @@ fn axis_change(
         delta: None,
         expected: None,
         labels: label.map(|l| Labels { row: None, column: Some(l), base_row: None, inferred: true }),
+        properties: Vec::new(),
     }
 }
 
@@ -1104,6 +1275,7 @@ fn row_change(id: &str, status: Status, base: Option<u32>, other: Option<u32>, l
         delta: None,
         expected: None,
         labels: label.map(|l| Labels { row: Some(l), column: None, base_row: None, inferred: true }),
+        properties: Vec::new(),
     }
 }
 
@@ -1156,6 +1328,9 @@ pub struct Listing {
     /// Changes left out by the filter or limit, by sheet name and kind.
     pub omitted: std::collections::BTreeMap<String, std::collections::BTreeMap<&'static str, usize>>,
     pub sheets: Vec<SheetComparison>,
+    /// Workbook-level changes (defined names, theme); left out when
+    /// `--sheet` is given.
+    pub objects: Vec<Change>,
 }
 
 impl Comparison {
@@ -1183,7 +1358,17 @@ impl Comparison {
                 sheets.push(sheet);
             }
         }
-        Listing { base: self.base, other: self.other, summary: self.summary, listed, omitted, sheets }
+        let mut objects = Vec::new();
+        for change in self.objects {
+            let wanted = filter.sheet.is_none() && (filter.kinds.is_empty() || filter.kinds.contains(&change.kind));
+            if wanted && filter.limit.is_none_or(|l| listed < l) {
+                listed += 1;
+                objects.push(change);
+            } else {
+                *omitted.entry("(workbook)".to_owned()).or_default().entry(change.kind.as_str()).or_default() += 1;
+            }
+        }
+        Listing { base: self.base, other: self.other, summary: self.summary, listed, omitted, sheets, objects }
     }
 }
 

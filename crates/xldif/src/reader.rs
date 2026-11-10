@@ -120,25 +120,53 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         None => crate::styles::Styles::default(),
     };
 
+    let read_hashed = |pkg: &mut Package<R>, kind: &str| -> Result<Option<u64>, Error> {
+        match rels.iter().find(|r| r.kind == kind && !r.external) {
+            Some(rel) => Ok(pkg.read_text(&rel.target)?.map(|t| crate::align::fnv(&[t.as_bytes()]))),
+            None => Ok(None),
+        }
+    };
+    let theme = read_hashed(pkg, "theme")?;
+    let people = match rels.iter().find(|r| r.kind == "person" && !r.external) {
+        Some(rel) => match pkg.read_text(&rel.target)? {
+            Some(text) => crate::sheet_objects::persons(&text, &rel.target)?,
+            None => HashMap::new(),
+        },
+        None => HashMap::new(),
+    };
+
     let mut warnings = Vec::new();
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     for entry in &wb.sheets {
-        let rel = by_id.get(entry.rel_id.as_str()).copied();
+        let rel = by_id.get(entry.rel_id.as_str()).copied().filter(|r| !r.external);
         let kind = match rel.map(|r| r.kind.as_str()) {
             Some("chartsheet") => SheetKind::Chartsheet,
             Some("dialogsheet") => SheetKind::Dialogsheet,
             Some("xlMacrosheet" | "xlIntlMacrosheet" | "macrosheet") => SheetKind::Macrosheet,
             _ => SheetKind::Worksheet,
         };
-        let mut sheet =
-            Sheet { name: entry.name.clone(), kind, visibility: entry.visibility, dimension: None, rows: Vec::new() };
+        let mut sheet = Sheet {
+            name: entry.name.clone(),
+            kind,
+            visibility: entry.visibility,
+            dimension: None,
+            rows: Vec::new(),
+            layout: crate::model::Layout::default(),
+            merges: Vec::new(),
+            comments: Vec::new(),
+            validations: Vec::new(),
+            conditional_formats: Vec::new(),
+            hyperlinks: Vec::new(),
+        };
         let text = match rel {
             Some(rel) => pkg.read_text(&rel.target)?,
             None => None,
         };
         match (text, rel) {
             (Some(text), Some(rel)) if kind != SheetKind::Chartsheet => {
-                parse_sheet(&text, &rel.target, &shared, &mut sheet, &mut budget, &mut warnings)?;
+                let sheet_rels = pkg.relationships(&rel.target)?;
+                parse_sheet(&text, &rel.target, &shared, &sheet_rels, &mut sheet, &mut budget, &mut warnings)?;
+                read_comments(pkg, &sheet_rels, &people, &mut sheet)?;
             }
             (None, _) => warnings.push(Warning {
                 code: "sheet_part_missing",
@@ -170,7 +198,16 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         };
         defined_names.push(DefinedName { name: n.name, scope, refers_to: n.refers_to, hidden: n.hidden });
     }
-    Ok(Workbook { format, date1904: wb.date1904, calculation: wb.calculation, sheets, defined_names, styles, warnings })
+    Ok(Workbook {
+        format,
+        date1904: wb.date1904,
+        calculation: wb.calculation,
+        sheets,
+        defined_names,
+        styles,
+        theme,
+        warnings,
+    })
 }
 
 fn truthy(v: Option<&str>) -> bool {
@@ -268,10 +305,39 @@ struct RawCell {
     formula: Option<Formula>,
 }
 
+/// A sheet's notes and threaded comments. Excel also saves a legacy note
+/// for each threaded comment (for older versions); a cell with a thread
+/// keeps only the thread, so one comment is not reported twice.
+fn read_comments<R: Read + Seek>(
+    pkg: &mut Package<R>,
+    rels: &[Relationship],
+    people: &HashMap<String, String>,
+    sheet: &mut Sheet,
+) -> Result<(), Error> {
+    let mut threads = Vec::new();
+    for rel in rels.iter().filter(|r| r.kind == "threadedComment" && !r.external) {
+        if let Some(text) = pkg.read_text(&rel.target)? {
+            threads.extend(crate::sheet_objects::threaded_comments(&text, &rel.target, people)?);
+        }
+    }
+    for rel in rels.iter().filter(|r| r.kind == "comments" && !r.external) {
+        if let Some(text) = pkg.read_text(&rel.target)? {
+            let notes = crate::sheet_objects::legacy_comments(&text, &rel.target)?;
+            sheet
+                .comments
+                .extend(notes.into_iter().filter(|n| !threads.iter().any(|t| (t.row, t.col) == (n.row, n.col))));
+        }
+    }
+    sheet.comments.extend(threads);
+    sheet.comments.sort_by_key(|c| (c.row, c.col));
+    Ok(())
+}
+
 fn parse_sheet(
     text: &str,
     part: &str,
     shared: &[Arc<str>],
+    rels: &[Relationship],
     sheet: &mut Sheet,
     budget: &mut Budget,
     warnings: &mut Vec<Warning>,
@@ -305,6 +371,9 @@ fn parse_sheet(
                     }
                     next_row = index + 1;
                     next_col = 1;
+                    if let Some(props) = crate::sheet_objects::row_props(&e, index) {
+                        sheet.layout.rows.push(props);
+                    }
                     row = Some(Row { index, cells: Vec::new() });
                 }
                 "c" => {
@@ -340,7 +409,35 @@ fn parse_sheet(
                 }
                 // Macro and dialog sheets share the worksheet's cell layout
                 // (macrosheet roots are unverified against an Excel-saved file).
-                "worksheet" | "macrosheet" | "dialogsheet" | "sheetData" => {}
+                "worksheet" | "macrosheet" | "dialogsheet" | "sheetData" | "cols" | "mergeCells" | "hyperlinks"
+                | "dataValidations" => {}
+                "col" => {
+                    budget.take()?;
+                    if let Some(props) = crate::sheet_objects::col_props(&e) {
+                        sheet.layout.cols.push(props);
+                    }
+                }
+                "mergeCell" => {
+                    budget.take()?;
+                    if let Some(range) = e.attr("ref").and_then(crate::cellref::Range::parse) {
+                        sheet.merges.push(range);
+                    }
+                }
+                "hyperlink" => {
+                    budget.take()?;
+                    if let Some(range) = e.attr("ref").and_then(crate::cellref::Range::parse) {
+                        let target = crate::sheet_objects::hyperlink_target(&e, rels);
+                        sheet.hyperlinks.push(crate::model::Hyperlink { range, target });
+                    }
+                }
+                "dataValidation" => {
+                    budget.take()?;
+                    sheet.validations.push(crate::sheet_objects::data_validation(&e, &mut p)?);
+                }
+                "conditionalFormatting" => {
+                    budget.take()?;
+                    sheet.conditional_formats.extend(crate::sheet_objects::conditional_formatting(&e, &mut p)?);
+                }
                 _ => p.skip_element()?,
             },
             Event::End(name) if name == "sheetData" => finish(row.take(), &mut sheet.rows),

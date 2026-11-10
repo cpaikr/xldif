@@ -129,6 +129,58 @@ pub struct Sheet {
     pub dimension: Option<String>,
     /// Sorted by row index; rows without written cells are absent.
     pub rows: Vec<Row>,
+    pub layout: Layout,
+    pub merges: Vec<crate::cellref::Range>,
+    pub comments: Vec<Comment>,
+    pub validations: Vec<RangeRule>,
+    pub conditional_formats: Vec<RangeRule>,
+    pub hyperlinks: Vec<Hyperlink>,
+}
+
+/// Row and column records that change how a sheet looks: hidden, a height
+/// or width set by hand, or a style for the whole row or column.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layout {
+    pub rows: Vec<LineProps>,
+    /// Column records; `index` is each record's first column and `last` its
+    /// last (a record may cover several columns).
+    pub cols: Vec<LineProps>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LineProps {
+    pub index: u32,
+    pub last: u32,
+    /// As written, only when set by hand (`customHeight`/`customWidth`).
+    pub size: Option<String>,
+    pub hidden: bool,
+    /// The style unwritten cells in this row or column take, when set.
+    pub style: Option<u32>,
+}
+
+/// A note or threaded comment on one cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub row: u32,
+    pub col: u32,
+    pub author: String,
+    /// The text; for a thread, each entry as `author: text` on its own line.
+    pub text: String,
+}
+
+/// A rule over ranges: data validation or conditional formatting, with the
+/// rule described as one comparable string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RangeRule {
+    pub ranges: Vec<crate::cellref::Range>,
+    pub rule: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hyperlink {
+    pub range: crate::cellref::Range,
+    /// The external address, or the location inside the workbook.
+    pub target: String,
 }
 
 impl Sheet {
@@ -182,6 +234,8 @@ pub struct Workbook {
     pub defined_names: Vec<DefinedName>,
     /// Resolved cell formats, by the `style` index cells carry.
     pub styles: crate::styles::Styles,
+    /// A fingerprint of the theme part, whose colors themed cells use.
+    pub theme: Option<u64>,
     pub warnings: Vec<Warning>,
 }
 

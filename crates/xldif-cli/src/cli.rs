@@ -42,8 +42,17 @@ pub struct Cli {
 pub enum Kind {
     Value,
     Formula,
+    Format,
     Row,
     Column,
+    Merge,
+    Comment,
+    Validation,
+    ConditionalFormat,
+    Hyperlink,
+    Sheet,
+    Name,
+    Theme,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -75,7 +84,9 @@ pub enum Command {
     /// content when renamed); rows and columns pair by labels and values, so
     /// an inserted row is one `row` change. Values are compared on paired
     /// rows and columns; formulas are compared after Excel's adjustment for
-    /// inserted and deleted rows. Formatting and objects come later.
+    /// inserted and deleted rows; formats, row and column layout, merges,
+    /// comments, validation, conditional formats, hyperlinks, sheet
+    /// visibility, defined names, and the theme are compared too.
     #[command(after_help = "Examples:
   xldif compare v1.xlsx v2.xlsx
   xldif compare v1.xlsx v2.xlsx --sheet BS --kind value --format text
@@ -84,7 +95,8 @@ pub enum Command {
 Reading the result:
   summary counts every change; `listed` and `omitted` say what the filters and
   --limit left out, by sheet and kind. Each change has a stable id, a kind
-  (value, formula, row, column), a status (changed, onlyBase, onlyOther, moved), base
+  (value, formula, format, row, column, merge, comment, validation,
+  conditional-format, hyperlink, sheet, name, theme), a status (changed, onlyBase, onlyOther, moved), base
   and other locations, a numeric delta, and inferred row/column labels. A
   formula change shows both formulas and `expected`: the base formula as
   Excel would have adjusted it for inserted and deleted rows and columns.

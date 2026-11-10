@@ -70,6 +70,15 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 .map(|k| match k {
                     Kind::Value => diff::Kind::Value,
                     Kind::Formula => diff::Kind::Formula,
+                    Kind::Format => diff::Kind::Format,
+                    Kind::Merge => diff::Kind::Merge,
+                    Kind::Comment => diff::Kind::Comment,
+                    Kind::Validation => diff::Kind::Validation,
+                    Kind::ConditionalFormat => diff::Kind::ConditionalFormat,
+                    Kind::Hyperlink => diff::Kind::Hyperlink,
+                    Kind::Sheet => diff::Kind::Sheet,
+                    Kind::Name => diff::Kind::Name,
+                    Kind::Theme => diff::Kind::Theme,
                     Kind::Row => diff::Kind::Row,
                     Kind::Column => diff::Kind::Column,
                 })
@@ -230,6 +239,14 @@ fn change_text(c: &Change) -> String {
             let _ = write!(line, " (expected ={})", escape(e));
         }
     }
+    for p in &c.properties {
+        let _ = write!(line, "\t{}: {} → {}", p.name, escape(&p.base), escape(&p.other));
+    }
+    if c.properties.is_empty()
+        && let Some(text) = c.other.as_ref().or(c.base.as_ref()).and_then(|l| l.text.as_deref())
+    {
+        let _ = write!(line, "\t{}", escape(text));
+    }
     if let Some(l) = &c.labels {
         let parts: Vec<&str> = [l.row.as_deref(), l.column.as_deref()].into_iter().flatten().collect();
         if !parts.is_empty() {
@@ -268,6 +285,12 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
         let moved = if sheet.moved { ", moved" } else { "" };
         let _ = writeln!(out, "\n[{name}] {}{moved}", sheet.status.as_str());
         for c in &sheet.changes {
+            let _ = writeln!(out, "{}", change_text(c));
+        }
+    }
+    if !l.objects.is_empty() {
+        out.push_str("\n[workbook]\n");
+        for c in &l.objects {
             let _ = writeln!(out, "{}", change_text(c));
         }
     }

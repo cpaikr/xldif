@@ -7,6 +7,7 @@
 
 pub mod raw;
 
+pub use rust_xlsxwriter;
 use rust_xlsxwriter::Formula;
 pub use rust_xlsxwriter::{Workbook, XlsxError};
 
