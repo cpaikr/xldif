@@ -8,15 +8,23 @@
 //! inserted or deleted rows and columns are covered by that row or column
 //! change, not listed one by one.
 //!
-//! Formulas (M2), formatting, and workbook objects (M3) are not compared yet.
+//! Formulas on paired cells are compared after carrying the base formula
+//! through the alignment, the way Excel adjusts references when rows and
+//! columns are inserted or deleted (references to other sheets follow those
+//! sheets' alignments). A formula that differs only by that adjustment is
+//! counted as adjusted, not listed. Runs of the same formula change filled
+//! down or across a column fold into one change with a range.
+//!
+//! Formatting and workbook objects (M3) are not compared yet.
 
 use std::collections::{HashMap, HashSet};
 
 use serde::Serialize;
 
 use crate::align::{self, Alignment, Item, Options};
-use crate::cellref::{cell_name, col_name};
-use crate::model::{Cell, Row, Sheet, Value, Warning, Workbook};
+use crate::cellref::{MAX_COL, MAX_ROW, Range, cell_name, col_name};
+use crate::formula::{self, AxisMap, SheetMap};
+use crate::model::{Cell, Formula, FormulaKind, Row, Sheet, Value, Warning, Workbook};
 use crate::views::{JsonValue, json_value, stale_value_warnings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,27 +75,32 @@ impl Status {
 #[serde(rename_all = "camelCase")]
 pub enum Kind {
     Value,
+    Formula,
     Row,
     Column,
 }
 
 impl Kind {
-    pub const ALL: [Self; 3] = [Self::Value, Self::Row, Self::Column];
+    pub const ALL: [Self; 4] = [Self::Value, Self::Formula, Self::Row, Self::Column];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Value => "value",
+            Self::Formula => "formula",
             Self::Row => "row",
             Self::Column => "column",
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cell: Option<String>,
+    /// For a folded change: the cells it covers, such as `D10:D40`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub row: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -96,6 +109,10 @@ pub struct Location {
     pub kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<JsonValue>,
+    /// The formula as stored (without `=`); for a folded change, the one in
+    /// its first cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -128,6 +145,11 @@ pub struct Change {
     /// `other - base`, for two numbers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta: Option<f64>,
+    /// For a formula change: the base formula as Excel would have adjusted
+    /// it for the inserted and deleted rows and columns, when that differs
+    /// from the base text. The other side's formula differs from this too.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub labels: Option<Labels>,
 }
@@ -193,6 +215,11 @@ pub struct Summary {
     pub columns_only_other: usize,
     pub columns_moved: usize,
     pub value: usize,
+    /// Formula changes, counting a folded run once.
+    pub formula: usize,
+    /// Formulas whose text differs only because Excel adjusted them for
+    /// inserted or deleted rows and columns; not listed.
+    pub formulas_adjusted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -230,39 +257,59 @@ pub fn compare(
 
     let pairs = pair_sheets(base, other);
     let moved = moved_sheets(&pairs);
+    // Align every sheet pair first: formulas refer across sheets, so each
+    // sheet's comparison needs every other sheet's row and column maps.
+    let aligned: Vec<(usize, usize, bool, Grid, Grid, Aligned)> = pairs
+        .iter()
+        .map(|&(bi, oi, renamed)| {
+            let (gb, go) = (Grid::new(&base.sheets[bi]), Grid::new(&other.sheets[oi]));
+            let al = align_grids(&gb, &go, options);
+            (bi, oi, renamed, gb, go, al)
+        })
+        .collect();
+    let maps: HashMap<String, SheetMap> = aligned
+        .iter()
+        .map(|(bi, oi, renamed, _, _, al)| {
+            let renamed_to = renamed.then(|| other.sheets[*oi].name.clone());
+            (base.sheets[*bi].name.to_lowercase(), al.sheet_map(renamed_to))
+        })
+        .collect();
+
     let mut sheets = Vec::new();
+    let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
-        if let Some(&(_, oi, renamed)) = pairs.iter().find(|p| p.0 == bi) {
-            paired_other[oi] = true;
-            let o = &other.sheets[oi];
-            let (alignment, changes, fell_back) = compare_sheets(&id, b, o, options);
-            if fell_back {
-                warnings.push(Warning {
-                    code: "alignment_fallback",
-                    message: format!(
-                        "sheet {:?}: part of the sheet was too large to align by content and was \
-                                      compared by position",
-                        b.name
-                    ),
-                });
-            }
-            let is_moved = moved.contains(&bi);
-            let status = if changes.is_empty() && !renamed && !is_moved { Status::Same } else { Status::Changed };
-            sheets.push(SheetComparison {
-                id,
-                status,
-                base: Some(b.name.clone()),
-                other: Some(o.name.clone()),
-                renamed,
-                moved: is_moved,
-                alignment: Some(alignment),
-                changes,
-            });
-        } else {
+        let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
             sheets.push(lone_sheet(id, Status::OnlyBase, &b.name));
+            continue;
+        };
+        paired_other[*oi] = true;
+        let o = &other.sheets[*oi];
+        let this = &maps[&b.name.to_lowercase()];
+        let (changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &maps, options);
+        adjusted += n_adjusted;
+        if al.fell_back {
+            warnings.push(Warning {
+                code: "alignment_fallback",
+                message: format!(
+                    "sheet {:?}: part of the sheet was too large to align by content and was compared by position",
+                    b.name
+                ),
+            });
         }
+        let is_moved = moved.contains(&bi);
+        let status = if changes.is_empty() && !renamed && !is_moved { Status::Same } else { Status::Changed };
+        sheets.push(SheetComparison {
+            id,
+            status,
+            base: Some(b.name.clone()),
+            other: Some(o.name.clone()),
+            renamed: *renamed,
+            moved: is_moved,
+            alignment: Some(al.view()),
+            changes,
+        });
     }
     for (oi, o) in other.sheets.iter().enumerate() {
         if !paired_other[oi] {
@@ -270,10 +317,12 @@ pub fn compare(
             sheets.push(lone_sheet(id, Status::OnlyOther, &o.name));
         }
     }
+    let mut summary = summarize(&sheets);
+    summary.formulas_adjusted = adjusted;
     Comparison {
         base: Side { file: base_file.to_owned(), sheets: base.sheets.len(), date1904: base.date1904 },
         other: Side { file: other_file.to_owned(), sheets: other.sheets.len(), date1904: other.date1904 },
-        summary: summarize(&sheets),
+        summary,
         sheets,
         warnings,
     }
@@ -298,6 +347,7 @@ fn summarize(sheets: &[SheetComparison]) -> Summary {
         for c in &sheet.changes {
             match (c.kind, c.status) {
                 (Kind::Value, _) => s.value += 1,
+                (Kind::Formula, _) => s.formula += 1,
                 (Kind::Row, Status::OnlyBase) => s.rows_only_base += 1,
                 (Kind::Row, Status::OnlyOther) => s.rows_only_other += 1,
                 (Kind::Row, Status::Moved) => s.rows_moved += 1,
@@ -416,12 +466,16 @@ pub fn numeric_text(text: &str) -> Option<f64> {
     Some(if negative { -n } else { n } * scale)
 }
 
-/// What a cell contributes to alignment: its value and, when it has one,
-/// its formula. A cell with neither (formatting only, or an empty string)
-/// contributes nothing, so its row or column is not an item at all.
-fn cell_tokens(cell: &Cell) -> impl Iterator<Item = Vec<u8>> + '_ {
-    let formula =
-        cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| [b"f".as_slice(), f.text.as_bytes()].concat());
+/// What a cell at `row` contributes to alignment: its value and, when it
+/// has one, its formula in position-free form (so `=B5*2` in row 5 and
+/// `=B6*2` in row 6 are the same token, as they are after an insertion). A
+/// cell with neither (formatting only, or an empty string) contributes
+/// nothing, so its row or column is not an item at all.
+fn cell_tokens(cell: &Cell, row: u32) -> impl Iterator<Item = Vec<u8>> + '_ {
+    let formula = cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| {
+        let form = formula::relative_form(&formula::tokenize(&f.text), row, cell.col);
+        [b"f".as_slice(), form.as_bytes()].concat()
+    });
     value_bytes(&cell.value).into_iter().chain(formula)
 }
 
@@ -465,7 +519,8 @@ struct Grid<'a> {
 
 impl<'a> Grid<'a> {
     fn new(sheet: &'a Sheet) -> Self {
-        let has_tokens = |c: &Cell| cell_tokens(c).next().is_some();
+        let has_tokens =
+            |c: &Cell| value_bytes(&c.value).is_some() || c.formula.as_ref().is_some_and(|f| !f.text.is_empty());
         let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(has_tokens)).collect();
         let mut by_col: std::collections::BTreeMap<u32, Vec<(u32, &Cell)>> = std::collections::BTreeMap::new();
         for row in &rows {
@@ -527,7 +582,8 @@ impl<'a> Grid<'a> {
             .map(|(_, cells)| {
                 let header: Vec<String> =
                     cells.iter().filter(|(r, _)| header_rows.contains(r)).filter_map(|(_, c)| header_text(c)).collect();
-                let mut tokens: Vec<u64> = cells.iter().flat_map(|(_, c)| cell_tokens(c)).map(|b| fnv(&[&b])).collect();
+                let mut tokens: Vec<u64> =
+                    cells.iter().flat_map(|(r, c)| cell_tokens(c, *r)).map(|b| fnv(&[&b])).collect();
                 tokens.sort_unstable();
                 Item { key: label_key(&header.join("/")), tokens, shape: 0 }
             })
@@ -545,7 +601,7 @@ impl<'a> Grid<'a> {
                 for c in &row.cells {
                     let Some(id) = col_ids.get(&c.col) else { continue };
                     let before = tokens.len();
-                    tokens.extend(cell_tokens(c).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])));
+                    tokens.extend(cell_tokens(c, row.index).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])));
                     if tokens.len() > before {
                         shape.extend_from_slice(&id.to_le_bytes());
                     }
@@ -676,14 +732,38 @@ impl Axis {
     }
 }
 
-fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (AlignmentView, Vec<Change>, bool) {
-    let (gb, go) = (Grid::new(b), Grid::new(o));
+/// One sheet pair's row and column alignment.
+struct Aligned {
+    cols: Axis,
+    rows: Axis,
+    method: &'static str,
+    fell_back: bool,
+}
+
+impl Aligned {
+    fn view(&self) -> AlignmentView {
+        let (rows, row_moves) = self.rows.view_runs();
+        let (cols, col_moves) = self.cols.view_runs();
+        AlignmentView { method: self.method, fell_back: self.fell_back, rows, row_moves, cols, col_moves }
+    }
+
+    fn sheet_map(&self, renamed_to: Option<String>) -> SheetMap {
+        let axis = |a: &Axis, max: u32| AxisMap::new(a.pairs.clone(), a.moves.clone(), a.lone_base.clone(), max);
+        SheetMap { renamed_to, rows: axis(&self.rows, MAX_ROW), cols: axis(&self.cols, MAX_COL) }
+    }
+}
+
+fn align_grids(gb: &Grid, go: &Grid, options: CompareOptions) -> Aligned {
     let col_numbers = |g: &Grid| g.cols.iter().map(|(c, _)| *c).collect::<Vec<u32>>();
     let row_numbers = |g: &Grid| g.rows.iter().map(|r| r.index).collect::<Vec<u32>>();
-    let (bc, oc, br, or) = (col_numbers(&gb), col_numbers(&go), row_numbers(&gb), row_numbers(&go));
-
-    let (col_al, row_al, method, fell_back) = match options.align {
-        AlignMode::Position => (Axis::identity(&bc, &oc), Axis::identity(&br, &or), "position", false),
+    let (bc, oc, br, or) = (col_numbers(gb), col_numbers(go), row_numbers(gb), row_numbers(go));
+    match options.align {
+        AlignMode::Position => Aligned {
+            cols: Axis::identity(&bc, &oc),
+            rows: Axis::identity(&br, &or),
+            method: "position",
+            fell_back: false,
+        },
         AlignMode::Content => {
             let col_al = align::align(&gb.column_items(), &go.column_items(), Options { positional_equal_gaps: true });
             let cols = Axis::new(&col_al, &bc, &oc);
@@ -700,20 +780,84 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
                 Options { positional_equal_gaps: false },
             );
             let fell_back = col_al.fell_back || row_al.fell_back;
-            (cols, Axis::new(&row_al, &br, &or), "content", fell_back)
+            Aligned { cols, rows: Axis::new(&row_al, &br, &or), method: "content", fell_back }
         }
-    };
+    }
+}
 
+/// What one paired cell's formulas amount to.
+enum FormulaDiff {
+    Same,
+    /// Different text, but only by Excel's adjustment for the alignment.
+    Adjusted,
+    Changed {
+        expected: Option<String>,
+    },
+}
+
+fn diff_formulas(
+    fb: Option<&Formula>,
+    fo: Option<&Formula>,
+    this: &SheetMap,
+    maps: &HashMap<String, SheetMap>,
+) -> FormulaDiff {
+    fn usable(f: Option<&Formula>) -> Option<&Formula> {
+        f.filter(|f| f.kind != FormulaKind::DataTable && !f.text.is_empty())
+    }
+    match (usable(fb), usable(fo)) {
+        (None, None) => FormulaDiff::Same,
+        (Some(_), None) | (None, Some(_)) => FormulaDiff::Changed { expected: None },
+        (Some(fb), Some(fo)) => {
+            let (tb, to) = (formula::tokenize(&fb.text), formula::tokenize(&fo.text));
+            if formula::same(&tb, &to) {
+                return FormulaDiff::Same;
+            }
+            let moved = formula::remap(&tb, this, |name| maps.get(&name.to_lowercase()));
+            if formula::same(&moved, &to) {
+                FormulaDiff::Adjusted
+            } else {
+                let expected = (!formula::same(&moved, &tb)).then(|| formula::render(&moved));
+                FormulaDiff::Changed { expected }
+            }
+        }
+    }
+}
+
+/// A formula change before folding: where it is and its position-free forms.
+struct FormulaEdit {
+    rb: u32,
+    cb: u32,
+    ro: u32,
+    co: u32,
+    /// Index of the row pair, so "neighbouring" follows the alignment.
+    k: usize,
+    status: Status,
+    base: Option<String>,
+    other: Option<String>,
+    expected: Option<String>,
+    /// `(base form, other form, expected form)` relative to each cell.
+    shape: (String, String, String),
+}
+
+fn sheet_changes(
+    id: &str,
+    gb: &Grid,
+    go: &Grid,
+    al: &Aligned,
+    this: &SheetMap,
+    maps: &HashMap<String, SheetMap>,
+    options: CompareOptions,
+) -> (Vec<Change>, usize) {
+    let (col_al, row_al) = (&al.cols, &al.rows);
     let mut changes = Vec::new();
-    let col_letter = |c: u32| col_name(c);
     for &c in &col_al.lone_base {
-        changes.push(axis_change(id, Kind::Column, Status::OnlyBase, Some(col_letter(c)), None, None));
+        changes.push(axis_change(id, Kind::Column, Status::OnlyBase, Some(col_name(c)), None, None));
     }
     for &c in &col_al.lone_other {
-        changes.push(axis_change(id, Kind::Column, Status::OnlyOther, None, Some(col_letter(c)), None));
+        changes.push(axis_change(id, Kind::Column, Status::OnlyOther, None, Some(col_name(c)), None));
     }
     for &(cb, co) in &col_al.moves {
-        changes.push(axis_change(id, Kind::Column, Status::Moved, Some(col_letter(cb)), Some(col_letter(co)), None));
+        changes.push(axis_change(id, Kind::Column, Status::Moved, Some(col_name(cb)), Some(col_name(co)), None));
     }
 
     let label = |g: &Grid, r: u32| {
@@ -725,20 +869,29 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
             .map(display_label)
     };
     for &r in &row_al.lone_base {
-        changes.push(row_change(id, Status::OnlyBase, Some(r), None, label(&gb, r)));
+        changes.push(row_change(id, Status::OnlyBase, Some(r), None, label(gb, r)));
     }
     for &r in &row_al.lone_other {
-        changes.push(row_change(id, Status::OnlyOther, None, Some(r), label(&go, r)));
+        changes.push(row_change(id, Status::OnlyOther, None, Some(r), label(go, r)));
     }
     for &(rb, ro) in &row_al.moves {
-        changes.push(row_change(id, Status::Moved, Some(rb), Some(ro), label(&go, ro)));
+        changes.push(row_change(id, Status::Moved, Some(rb), Some(ro), label(go, ro)));
     }
+
+    let labels_for = |rb: u32, cb: u32, ro: u32, co: u32| {
+        let row_label = label(go, ro).or_else(|| label(gb, rb));
+        let base_row = label(gb, rb).filter(|l| Some(l) != row_label.as_ref());
+        let column = go.column_label(ro, co).or_else(|| gb.column_label(rb, cb));
+        Labels { row: row_label, column, base_row, inferred: true }
+    };
 
     // Visit populated cells only: a sparse sheet's paired rows times paired
     // columns can be billions of empty combinations.
     let to_other: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).copied().collect();
     let to_base: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).map(|&(b, o)| (o, b)).collect();
-    for &(rb, ro) in row_al.pairs.iter().chain(&row_al.moves) {
+    let mut edits: Vec<FormulaEdit> = Vec::new();
+    let mut adjusted = 0;
+    for (k, &(rb, ro)) in row_al.pairs.iter().chain(&row_al.moves).enumerate() {
         let from_base = gb.row_cells(rb).iter().filter_map(|c| to_other.get(&c.col).map(|&co| (c.col, co)));
         let from_other = go
             .row_cells(ro)
@@ -747,8 +900,40 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
             .filter(|&(cb, _)| gb.cell(rb, cb).is_none());
         let cols: Vec<(u32, u32)> = from_base.chain(from_other).collect();
         for (cb, co) in cols {
-            let vb = gb.cell(rb, cb).map_or(&Value::Empty, |c| &c.value);
-            let vo = go.cell(ro, co).map_or(&Value::Empty, |c| &c.value);
+            let (cell_b, cell_o) = (gb.cell(rb, cb), go.cell(ro, co));
+            let (fb, fo) = (cell_b.and_then(|c| c.formula.as_ref()), cell_o.and_then(|c| c.formula.as_ref()));
+            match diff_formulas(fb, fo, this, maps) {
+                FormulaDiff::Same => {}
+                FormulaDiff::Adjusted => adjusted += 1,
+                FormulaDiff::Changed { expected } => {
+                    let form = |f: Option<&Formula>, r: u32, c: u32| {
+                        f.map(|f| formula::relative_form(&formula::tokenize(&f.text), r, c)).unwrap_or_default()
+                    };
+                    let expected_form = expected
+                        .as_deref()
+                        .map(|e| formula::relative_form(&formula::tokenize(e), ro, co))
+                        .unwrap_or_default();
+                    edits.push(FormulaEdit {
+                        rb,
+                        cb,
+                        ro,
+                        co,
+                        k,
+                        status: match (fb.is_some(), fo.is_some()) {
+                            (false, _) => Status::OnlyOther,
+                            (_, false) => Status::OnlyBase,
+                            _ => Status::Changed,
+                        },
+                        base: fb.map(|f| f.text.clone()),
+                        other: fo.map(|f| f.text.clone()),
+                        expected,
+                        shape: (form(fb, rb, cb), form(fo, ro, co), expected_form),
+                    });
+                }
+            }
+
+            let vb = cell_b.map_or(&Value::Empty, |c| &c.value);
+            let vo = cell_o.map_or(&Value::Empty, |c| &c.value);
             if same_value(vb, vo, options.tolerance) {
                 continue;
             }
@@ -763,9 +948,6 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
                 _ => None,
             };
             let (bn, on) = (cell_name(rb, cb), cell_name(ro, co));
-            let row_label = label(&go, ro).or_else(|| label(&gb, rb));
-            let base_row = label(&gb, rb).filter(|l| Some(l) != row_label.as_ref());
-            let column = go.column_label(ro, co).or_else(|| gb.column_label(rb, cb));
             changes.push(Change {
                 id: format!("{id}:value:{bn}:{on}"),
                 kind: Kind::Value,
@@ -773,20 +955,79 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
                 base: Some(cell_location(bn, vb)),
                 other: Some(cell_location(on, vo)),
                 delta,
-                labels: Some(Labels { row: row_label, column, base_row, inferred: true }),
+                expected: None,
+                labels: Some(labels_for(rb, cb, ro, co)),
             });
         }
     }
+    changes.extend(fold_formula_edits(id, edits, &labels_for));
     changes.sort_by_key(order_key);
+    (changes, adjusted)
+}
 
-    let (rows, row_moves) = row_al.view_runs();
-    let (cols, col_moves) = col_al.view_runs();
-    (AlignmentView { method, fell_back, rows, row_moves, cols, col_moves }, changes, fell_back)
+/// Folds formula edits that are the same change filled down a column (or
+/// across a row): neighbouring cells, in alignment order, whose base,
+/// other, and expected formulas have the same position-free form.
+fn fold_formula_edits(
+    id: &str,
+    mut edits: Vec<FormulaEdit>,
+    labels_for: &dyn Fn(u32, u32, u32, u32) -> Labels,
+) -> Vec<Change> {
+    let mut out = Vec::new();
+    // Down columns first: (column pair, row order).
+    edits.sort_by_key(|e| (e.cb, e.co, e.k));
+    let mut runs: Vec<Vec<FormulaEdit>> = Vec::new();
+    for e in edits {
+        if let Some(run) = runs.last_mut()
+            && let Some(last) = run.last()
+            && (last.cb, last.co) == (e.cb, e.co)
+            && e.k == last.k + 1
+            && last.status == e.status
+            && last.shape == e.shape
+        {
+            run.push(e);
+            continue;
+        }
+        runs.push(vec![e]);
+    }
+    for run in runs {
+        let (first, last) = (&run[0], &run[run.len() - 1]);
+        let span = |r1: u32, c1: u32, r2: u32, c2: u32| {
+            let range =
+                Range { first_row: r1.min(r2), first_col: c1.min(c2), last_row: r1.max(r2), last_col: c1.max(c2) };
+            (run.len() > 1).then(|| range.name())
+        };
+        let (bn, on) = (cell_name(first.rb, first.cb), cell_name(first.ro, first.co));
+        let base_range = span(first.rb, first.cb, last.rb, last.cb);
+        let other_range = span(first.ro, first.co, last.ro, last.co);
+        let reference = |range: &Option<String>, cell: &str| range.clone().unwrap_or_else(|| cell.to_owned());
+        out.push(Change {
+            id: format!("{id}:formula:{}:{}", reference(&base_range, &bn), reference(&other_range, &on)),
+            kind: Kind::Formula,
+            status: first.status,
+            base: Some(Location {
+                cell: Some(bn),
+                range: base_range,
+                formula: first.base.clone(),
+                ..Location::default()
+            }),
+            other: Some(Location {
+                cell: Some(on),
+                range: other_range,
+                formula: first.other.clone(),
+                ..Location::default()
+            }),
+            delta: None,
+            expected: first.expected.clone(),
+            labels: Some(labels_for(first.rb, first.cb, first.ro, first.co)),
+        });
+    }
+    out
 }
 
 fn cell_location(cell: String, v: &Value) -> Location {
     let kind = (!matches!(v, Value::Empty)).then(|| v.type_name());
-    Location { cell: Some(cell), row: None, column: None, kind, value: json_value(v) }
+    Location { cell: Some(cell), kind, value: json_value(v), ..Location::default() }
 }
 
 fn axis_change(
@@ -798,8 +1039,7 @@ fn axis_change(
     label: Option<String>,
 ) -> Change {
     let reference = |x: &Option<String>| x.clone().unwrap_or_else(|| "-".to_owned());
-    let loc =
-        |c: Option<String>| c.map(|c| Location { cell: None, row: None, column: Some(c), kind: None, value: None });
+    let loc = |c: Option<String>| c.map(|c| Location { column: Some(c), ..Location::default() });
     Change {
         id: format!("{id}:{}:{}:{}", kind.as_str(), reference(&base), reference(&other)),
         kind,
@@ -807,13 +1047,14 @@ fn axis_change(
         base: loc(base),
         other: loc(other),
         delta: None,
+        expected: None,
         labels: label.map(|l| Labels { row: None, column: Some(l), base_row: None, inferred: true }),
     }
 }
 
 fn row_change(id: &str, status: Status, base: Option<u32>, other: Option<u32>, label: Option<String>) -> Change {
     let reference = |x: Option<u32>| x.map_or_else(|| "-".to_owned(), |r| r.to_string());
-    let loc = |r: Option<u32>| r.map(|r| Location { cell: None, row: Some(r), column: None, kind: None, value: None });
+    let loc = |r: Option<u32>| r.map(|r| Location { row: Some(r), ..Location::default() });
     Change {
         id: format!("{id}:row:{}:{}", reference(base), reference(other)),
         kind: Kind::Row,
@@ -821,6 +1062,7 @@ fn row_change(id: &str, status: Status, base: Option<u32>, other: Option<u32>, l
         base: loc(base),
         other: loc(other),
         delta: None,
+        expected: None,
         labels: label.map(|l| Labels { row: Some(l), column: None, base_row: None, inferred: true }),
     }
 }
@@ -839,7 +1081,12 @@ fn order_key(c: &Change) -> (u8, u32, u32, u8) {
         }
     };
     let (r, col) = if c.other.is_some() { parse(&c.other) } else { parse(&c.base) };
-    (u8::from(c.kind != Kind::Column), r, col, u8::from(c.kind == Kind::Value))
+    (
+        u8::from(c.kind != Kind::Column),
+        r,
+        col,
+        u8::from(matches!(c.kind, Kind::Value | Kind::Formula)) + u8::from(c.kind == Kind::Value),
+    )
 }
 
 // ---------------------------------------------------------------------------

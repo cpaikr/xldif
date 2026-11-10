@@ -14,8 +14,11 @@ Status:
 - M1 is done: the reader (`inspect`, `cells`, openpyxl parity clean on 29
   private workbooks) and values-only `compare` with content alignment
   (self-compare and swap symmetry clean on the corpus).
-- Next action: M2, the formula tokenizer and comparing formulas through
-  the alignment.
+- M2 is done: the formula tokenizer, shared formulas expanded (all 13,954
+  in the private corpus match openpyxl's expansion), and formulas compared
+  through the alignment, including references to other sheets and renamed
+  sheets, with runs folded.
+- Next action: M3, formatting and workbook objects.
 
 ## Decisions
 
@@ -274,8 +277,14 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     That is not reported by default. It is folded into a
     `formula`/`adjusted` change that `--kind formula` with `--all` shows.
   - A real rewrite reports the base and other formulas plus `expected`.
-  - Array formulas are compared as anchor plus range, and dynamic arrays
-    flag spill-range growth once.
+  - As built in M2, adjusted formulas are counted in
+    `summary.formulasAdjusted` and never listed. A deleted range corner
+    moves inward to the nearest surviving row, as Excel shrinks a range; a
+    deleted single reference becomes `#REF!`. References to other sheets
+    follow those sheets' alignments, and a renamed sheet's references are
+    renamed.
+  - Array formulas compare by their anchor text; the spill range itself is
+    not compared yet, and dynamic-array metadata is not read.
   - Cached values are compared separately, as values.
 - **Formatting:**
   - Compare each written cell's resolved properties: number format, font

@@ -340,6 +340,7 @@ fn parse_sheet(
     }
     finish(row.take(), &mut sheet.rows);
     normalize(&mut sheet.rows);
+    expand_shared_formulas(&mut sheet.rows);
     if bad_values > 0 {
         warnings.push(Warning {
             code: "unreadable_value",
@@ -404,6 +405,44 @@ fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared:
             "" => Ok(Value::Empty),
             t => t.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Number).ok_or(v),
         },
+    }
+}
+
+/// Gives every cell of a shared formula its own text. Excel stores the text
+/// once, on the anchor cell (the one with `ref`), and the other cells name
+/// it by `si`; each reads as the anchor's formula shifted by its offset.
+/// A follower whose anchor is missing keeps its empty text.
+fn expand_shared_formulas(rows: &mut [Row]) {
+    let mut anchors: HashMap<u32, (u32, u32, Vec<crate::formula::Token>)> = HashMap::new();
+    for row in rows.iter() {
+        for cell in &row.cells {
+            if let Some(f) = &cell.formula
+                && f.kind == FormulaKind::Shared
+                && !f.text.is_empty()
+                && let Some(si) = f.shared_index
+            {
+                anchors.entry(si).or_insert_with(|| (row.index, cell.col, crate::formula::tokenize(&f.text)));
+            }
+        }
+    }
+    if anchors.is_empty() {
+        return;
+    }
+    for row in rows.iter_mut() {
+        for cell in &mut row.cells {
+            let Some(f) = &mut cell.formula else { continue };
+            if f.kind != FormulaKind::Shared || !f.text.is_empty() {
+                continue;
+            }
+            if let Some((r, c, tokens)) = f.shared_index.and_then(|si| anchors.get(&si)) {
+                let shifted = crate::formula::shift(
+                    tokens,
+                    i64::from(row.index) - i64::from(*r),
+                    i64::from(cell.col) - i64::from(*c),
+                );
+                f.text = crate::formula::render(&shifted);
+            }
+        }
     }
 }
 

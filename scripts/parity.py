@@ -4,10 +4,10 @@
 Usage: python -I scripts/parity.py [--show] XLDIF_EXE BOOK...
 
 For every worksheet of every book, the set of cells with content, each
-cell's stored value, and each formula's text must agree. Known, intended
+cell's stored value, and each formula's text must agree, including the
+shared-formula cells xldif expands from their anchor. Known, intended
 differences are skipped and counted, not hidden:
 
-- shared-formula cells after the anchor (xldif expands them in M2);
 - cells openpyxl reads as dates are compared as Excel serial numbers;
 - openpyxl drops cells whose only content is an empty string;
 - openpyxl drops values stored in merged cells other than the top-left one,
@@ -123,9 +123,7 @@ def check_book(exe: str, path: str, label: str, show: bool, tally: Counter) -> N
                 report(tally, show, label, name, coord, "cell only in openpyxl", None, raw)
                 continue
             expected_formula = theirs_formula(raw, raw_type)
-            if mine.get("formulaKind") == "shared" and mine.get("formula") == "":
-                tally["skipped: shared formula follower"] += 1
-            elif mine.get("formulaKind") == "dataTable":
+            if mine.get("formulaKind") == "dataTable":
                 tally["skipped: data table formula"] += 1
             elif expected_formula is not None or "formula" in mine:
                 got = "=" + mine["formula"] if "formula" in mine else None

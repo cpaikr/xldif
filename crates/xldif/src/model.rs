@@ -74,8 +74,9 @@ impl Value {
 #[serde(rename_all = "camelCase")]
 pub enum FormulaKind {
     Normal,
-    /// One formula shared across a range; `text` is empty on cells after the
-    /// anchor until M2 expands them.
+    /// One formula shared across a range. Every cell's `text` is the formula
+    /// as that cell reads it; the file stores it on the anchor only. `text`
+    /// stays empty only when the anchor is missing.
     Shared,
     /// An array formula; only the anchor cell carries it.
     Array,

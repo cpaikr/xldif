@@ -41,6 +41,7 @@ pub struct Cli {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Kind {
     Value,
+    Formula,
     Row,
     Column,
 }
@@ -73,7 +74,8 @@ pub enum Command {
     /// What changed between two workbooks. Sheets pair by name (or by
     /// content when renamed); rows and columns pair by labels and values, so
     /// an inserted row is one `row` change. Values are compared on paired
-    /// rows and columns. Formulas, formatting, and objects come later.
+    /// rows and columns; formulas are compared after Excel's adjustment for
+    /// inserted and deleted rows. Formatting and objects come later.
     #[command(after_help = "Examples:
   xldif compare v1.xlsx v2.xlsx
   xldif compare v1.xlsx v2.xlsx --sheet BS --kind value --format text
@@ -82,8 +84,13 @@ pub enum Command {
 Reading the result:
   summary counts every change; `listed` and `omitted` say what the filters and
   --limit left out, by sheet and kind. Each change has a stable id, a kind
-  (value, row, column), a status (changed, onlyBase, onlyOther, moved), base
-  and other locations, a numeric delta, and inferred row/column labels.
+  (value, formula, row, column), a status (changed, onlyBase, onlyOther, moved), base
+  and other locations, a numeric delta, and inferred row/column labels. A
+  formula change shows both formulas and `expected`: the base formula as
+  Excel would have adjusted it for inserted and deleted rows and columns.
+  The same change filled down a column folds into one change with a range;
+  formulas that differ only by that adjustment are counted in
+  summary.formulasAdjusted and not listed.
   alignment.rows/cols are runs [base start, other start, length].")]
     Compare {
         /// The earlier workbook (left side).
@@ -118,8 +125,8 @@ Examples:
   xldif cells book.xlsx --sheet BS --range B10:F30 --format text
   xldif cells book.xlsx --sheet BS --limit 0      every cell
 
-Shared formulas show their text on the anchor cell only for now; the cells
-that share it show an empty formula with formulaKind \"shared\".")]
+A shared formula shows, on every cell that shares it, the formula as that
+cell reads it (formulaKind \"shared\"); formulaRange appears on the anchor.")]
     Cells {
         /// The workbook (.xlsx or .xlsm).
         book: PathBuf,

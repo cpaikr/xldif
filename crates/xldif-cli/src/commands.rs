@@ -69,6 +69,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 .into_iter()
                 .map(|k| match k {
                     Kind::Value => diff::Kind::Value,
+                    Kind::Formula => diff::Kind::Formula,
                     Kind::Row => diff::Kind::Row,
                     Kind::Column => diff::Kind::Column,
                 })
@@ -195,8 +196,10 @@ fn value_text(v: Option<&JsonValue>) -> String {
 }
 
 fn reference(l: Option<&Location>) -> String {
-    l.and_then(|l| l.cell.clone().or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone()))
-        .unwrap_or_else(|| "-".to_owned())
+    l.and_then(|l| {
+        l.range.clone().or_else(|| l.cell.clone()).or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone())
+    })
+    .unwrap_or_else(|| "-".to_owned())
 }
 
 fn change_text(c: &Change) -> String {
@@ -216,6 +219,15 @@ fn change_text(c: &Change) -> String {
         );
         if let Some(d) = c.delta {
             let _ = write!(line, " ({d:+})");
+        }
+    }
+    if c.kind == diff::Kind::Formula {
+        let shown = |l: Option<&Location>| {
+            l.and_then(|l| l.formula.as_deref()).map_or_else(|| "(none)".to_owned(), |f| format!("={}", escape(f)))
+        };
+        let _ = write!(line, "\t{} → {}", shown(c.base.as_ref()), shown(c.other.as_ref()));
+        if let Some(e) = &c.expected {
+            let _ = write!(line, " (expected ={})", escape(e));
         }
     }
     if let Some(l) = &c.labels {
