@@ -46,8 +46,12 @@ fn effective_style(sheet: &Sheet, row: u32, col: u32) -> u32 {
     line_at(&sheet.layout.cols, col).and_then(|l| l.style).unwrap_or(0)
 }
 
+/// The record covering `n`. Records are sorted by first line (the reader
+/// keeps file order, which Excel writes ascending); a binary search finds
+/// the last record starting at or before `n`.
 fn line_at(records: &[LineProps], n: u32) -> Option<&LineProps> {
-    records.iter().find(|l| (l.index..=l.last).contains(&n))
+    let k = records.partition_point(|l| l.index <= n);
+    records[..k].iter().rev().take(2).find(|l| (l.index..=l.last).contains(&n))
 }
 
 /// Property changes between two styles: `(property, base, other)`.
@@ -144,31 +148,41 @@ fn format_changes(id: &str, b: Side, o: Side, fwd: &SheetMap, inv: &SheetMap) ->
         .collect()
 }
 
-/// Row or column records compared through the alignment: hand-set size and
-/// hidden state. Neighbouring lines with the same change fold together.
+/// Row or column records compared through the alignment: hand-set size,
+/// hidden state, and the style the line gives its unwritten cells.
+/// Neighbouring lines with the same change fold together.
 fn layout_changes(
     id: &str,
     kind: Kind,
-    base: &[LineProps],
-    other: &[LineProps],
+    b: Side,
+    o: Side,
     fwd: &crate::formula::AxisMap,
     inv: &crate::formula::AxisMap,
 ) -> Vec<Change> {
-    let props = |l: Option<&LineProps>| (l.and_then(|l| l.size.clone()), l.is_some_and(|l| l.hidden));
-    let lines = |records: &[LineProps]| -> Vec<u32> {
-        // Records covering the rest of the sheet (hidden unused columns) are
-        // compared line by line up to a bound.
-        records.iter().flat_map(|l| l.index..=l.last.min(l.index + 16_384)).collect()
+    let (base, other) = if kind == Kind::Row {
+        (&b.sheet.layout.rows, &o.sheet.layout.rows)
+    } else {
+        (&b.sheet.layout.cols, &o.sheet.layout.cols)
+    };
+    let sorted = |v: &[LineProps]| {
+        let mut v = v.to_vec();
+        v.sort_by_key(|l| l.index);
+        v
+    };
+    let (base, other) = (sorted(base), sorted(other));
+    // Distinct lines named by any record: at most the grid's extent.
+    let lines = |records: &[LineProps]| -> std::collections::BTreeSet<u32> {
+        records.iter().flat_map(|l| l.index..=l.last).collect()
     };
     let mut pairs: Vec<(u32, u32)> = Vec::new();
     let mut seen = HashSet::new();
-    for nb in lines(base) {
+    for nb in lines(&base) {
         if let Some(no) = fwd.map(nb) {
             seen.insert(no);
             pairs.push((no, nb));
         }
     }
-    for no in lines(other) {
+    for no in lines(&other) {
         if !seen.contains(&no)
             && let Some(nb) = inv.map(no)
         {
@@ -178,19 +192,42 @@ fn layout_changes(
     pairs.sort_unstable();
     pairs.dedup();
     let size_name = if kind == Kind::Row { "height" } else { "width" };
+    let mut style_cache: HashMap<(u32, u32), Vec<Property>> = HashMap::new();
     let mut out: Vec<(u32, u32, u32, u32, Vec<Property>)> = Vec::new();
     for (no, nb) in pairs {
-        let (pb, po) = (props(line_at(base, nb)), props(line_at(other, no)));
-        if pb == po {
-            continue;
-        }
+        let (lb, lo) = (line_at(&base, nb), line_at(&other, no));
+        let size = |l: Option<&LineProps>| l.and_then(|l| l.size.clone());
+        let hidden = |l: Option<&LineProps>| l.is_some_and(|l| l.hidden);
+        let style = |l: Option<&LineProps>| l.and_then(|l| l.style).unwrap_or(0);
         let show = |s: &Option<String>| s.clone().unwrap_or_else(|| "default".to_owned());
         let mut properties = Vec::new();
-        if pb.0 != po.0 {
-            properties.push(prop(size_name, show(&pb.0), show(&po.0)));
+        if size(lb) != size(lo) {
+            properties.push(prop(size_name, show(&size(lb)), show(&size(lo))));
         }
-        if pb.1 != po.1 {
-            properties.push(prop("hidden", if pb.1 { "yes" } else { "no" }, if po.1 { "yes" } else { "no" }));
+        if hidden(lb) != hidden(lo) {
+            properties.push(prop(
+                "hidden",
+                if hidden(lb) { "yes" } else { "no" },
+                if hidden(lo) { "yes" } else { "no" },
+            ));
+        }
+        let (sb, so) = (style(lb), style(lo));
+        properties.extend(
+            style_cache
+                .entry((sb, so))
+                .or_insert_with(|| {
+                    b.styles
+                        .format(sb)
+                        .differences(&o.styles.format(so))
+                        .into_iter()
+                        .map(|(n, x, y)| prop(&format!("style.{n}"), x, y))
+                        .collect()
+                })
+                .iter()
+                .cloned(),
+        );
+        if properties.is_empty() {
+            continue;
         }
         if let Some(last) = out.last_mut()
             && last.1 + 1 == no
@@ -317,81 +354,94 @@ fn ranges_name(ranges: &[Range]) -> String {
     ranges.iter().map(Range::name).collect::<Vec<_>>().join(" ")
 }
 
-/// Rules over ranges (validation, conditional formatting): a rule on the
-/// same (mapped) ranges with different content is a change; others are
+/// A rule with its (mapped, sorted) ranges, as matched.
+type Placed<'a> = (Vec<Range>, &'a RangeRule);
+/// How rules are keyed in one matching pass.
+type RuleKey<'k> = &'k dyn Fn(&Placed<'_>) -> String;
+
+/// Rules over ranges (validation, conditional formatting, hyperlinks),
+/// matched in three passes: the same (mapped) ranges and rule is no change;
+/// then the same ranges with a different rule is a rule change; then the
+/// same rule on different ranges is a ranges change. What is left is
 /// one-sided.
 fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], fwd: &SheetMap) -> Vec<Change> {
-    let map_all = |r: &RangeRule| -> Option<Vec<Range>> {
-        let mut m: Vec<Range> = r.ranges.iter().filter_map(|&x| map_range(x, fwd)).collect();
-        m.sort_unstable();
-        (!m.is_empty()).then_some(m)
-    };
-    let sorted = |r: &RangeRule| {
-        let mut m = r.ranges.clone();
+    let sorted = |ranges: &[Range]| {
+        let mut m = ranges.to_vec();
         m.sort_unstable();
         m
     };
-    let mut left: Vec<(Vec<Range>, &RangeRule)> = base.iter().filter_map(|r| map_all(r).map(|m| (m, r))).collect();
-    let mut right: Vec<(Vec<Range>, &RangeRule)> = other.iter().map(|r| (sorted(r), r)).collect();
-    // Exact matches first.
-    left.retain(|(m, r)| {
-        if let Some(i) = right.iter().position(|(n, s)| n == m && s.rule == r.rule) {
-            right.remove(i);
-            false
-        } else {
-            true
+    let mapped = |r: &RangeRule| -> Option<Vec<Range>> {
+        let m: Vec<Range> = r.ranges.iter().filter_map(|&x| map_range(x, fwd)).collect();
+        (!m.is_empty()).then(|| sorted(&m))
+    };
+    // Base rules whose ranges survive, and every other-side rule, by index.
+    let left: Vec<Placed<'_>> = base.iter().filter_map(|r| mapped(r).map(|m| (m, r))).collect();
+    let right: Vec<Placed<'_>> = other.iter().map(|r| (sorted(&r.ranges), r)).collect();
+    let mut left_done = vec![false; left.len()];
+    let mut right_done = vec![false; right.len()];
+    // Index of other-side rules by a key, consumed in order.
+    let index = |key: RuleKey<'_>| {
+        let mut map: HashMap<String, std::collections::VecDeque<usize>> = HashMap::new();
+        for (j, r) in right.iter().enumerate() {
+            map.entry(key(r)).or_default().push_back(j);
         }
-    });
+        map
+    };
+    let both = |r: &Placed<'_>| format!("{}|{}", ranges_name(&r.0), r.1.rule);
+    let by_ranges = |r: &Placed<'_>| ranges_name(&r.0);
+    let by_rule = |r: &Placed<'_>| r.1.rule.clone();
     let loc = |ranges: &[Range], rule: &str| Location {
         range: Some(ranges_name(ranges)),
         text: Some(rule.to_owned()),
         ..Location::default()
     };
     let mut out = Vec::new();
-    // The same rule over different ranges: its ranges changed.
-    left.retain(|(m, r)| {
-        let Some(i) = right.iter().position(|(_, s)| s.rule == r.rule) else { return true };
-        let (n, s) = right.remove(i);
-        let mut c = change(
-            format!("{id}:{}:{}:{}", kind.as_str(), ranges_name(&r.ranges), ranges_name(&n)),
-            kind,
-            Status::Changed,
-            Some(loc(&r.ranges, &r.rule)),
-            Some(loc(&n, &s.rule)),
-        );
-        c.properties = vec![prop("ranges", ranges_name(m), ranges_name(&n))];
-        out.push(c);
-        false
-    });
-    for (m, r) in left {
-        if let Some(i) = right.iter().position(|(n, _)| *n == m) {
-            let (n, s) = right.remove(i);
+    for (pass, key) in [(0, &both as RuleKey<'_>), (1, &by_ranges), (2, &by_rule)] {
+        let mut available = index(key);
+        for (i, l) in left.iter().enumerate() {
+            if left_done[i] {
+                continue;
+            }
+            let Some(queue) = available.get_mut(&key(l)) else { continue };
+            let Some(j) = std::iter::from_fn(|| queue.pop_front()).find(|&j| !right_done[j]) else { continue };
+            left_done[i] = true;
+            right_done[j] = true;
+            if pass == 0 {
+                continue;
+            }
+            let (n, s) = &right[j];
+            let (name, before, after) = if pass == 1 {
+                ("rule", l.1.rule.clone(), s.rule.clone())
+            } else {
+                ("ranges", ranges_name(&l.0), ranges_name(n))
+            };
             let mut c = change(
-                format!("{id}:{}:{}:{}", kind.as_str(), ranges_name(&r.ranges), ranges_name(&n)),
+                format!("{id}:{}:{}:{}", kind.as_str(), ranges_name(&l.1.ranges), ranges_name(n)),
                 kind,
                 Status::Changed,
-                Some(loc(&r.ranges, &r.rule)),
-                Some(loc(&n, &s.rule)),
+                Some(loc(&l.1.ranges, &l.1.rule)),
+                Some(loc(n, &s.rule)),
             );
-            c.properties = vec![prop("rule", r.rule.clone(), s.rule.clone())];
+            c.properties = vec![prop(name, before, after)];
             out.push(c);
-        } else {
-            out.push(change(
-                format!("{id}:{}:{}:-", kind.as_str(), ranges_name(&r.ranges)),
-                kind,
-                Status::OnlyBase,
-                Some(loc(&r.ranges, &r.rule)),
-                None,
-            ));
         }
     }
-    for (n, s) in right {
+    for (_, (_, r)) in left.iter().enumerate().filter(|(i, _)| !left_done[*i]) {
         out.push(change(
-            format!("{id}:{}:-:{}", kind.as_str(), ranges_name(&n)),
+            format!("{id}:{}:{}:-", kind.as_str(), ranges_name(&r.ranges)),
+            kind,
+            Status::OnlyBase,
+            Some(loc(&r.ranges, &r.rule)),
+            None,
+        ));
+    }
+    for (_, (n, s)) in right.iter().enumerate().filter(|(j, _)| !right_done[*j]) {
+        out.push(change(
+            format!("{id}:{}:-:{}", kind.as_str(), ranges_name(n)),
             kind,
             Status::OnlyOther,
             None,
-            Some(loc(&n, &s.rule)),
+            Some(loc(n, &s.rule)),
         ));
     }
     out
@@ -399,7 +449,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
 
 fn hyperlink_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> {
     let to_rules = |links: &[crate::model::Hyperlink]| -> Vec<RangeRule> {
-        links.iter().map(|h| RangeRule { ranges: vec![h.range], rule: h.target.clone() }).collect()
+        links.iter().map(|h| RangeRule { ranges: vec![h.range].into(), rule: h.target.clone() }).collect()
     };
     rule_changes(id, Kind::Hyperlink, &to_rules(&b.sheet.hyperlinks), &to_rules(&o.sheet.hyperlinks), fwd)
 }
@@ -407,8 +457,8 @@ fn hyperlink_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> 
 /// Every non-cell change of one sheet pair.
 pub fn sheet_object_changes(id: &str, b: Side, o: Side, fwd: &SheetMap, inv: &SheetMap) -> Vec<Change> {
     let mut out = format_changes(id, b, o, fwd, inv);
-    out.extend(layout_changes(id, Kind::Row, &b.sheet.layout.rows, &o.sheet.layout.rows, &fwd.rows, &inv.rows));
-    out.extend(layout_changes(id, Kind::Column, &b.sheet.layout.cols, &o.sheet.layout.cols, &fwd.cols, &inv.cols));
+    out.extend(layout_changes(id, Kind::Row, b, o, &fwd.rows, &inv.rows));
+    out.extend(layout_changes(id, Kind::Column, b, o, &fwd.cols, &inv.cols));
     out.extend(merge_changes(id, b, o, fwd));
     out.extend(comment_changes(id, b, o, fwd));
     out.extend(rule_changes(id, Kind::Validation, &b.sheet.validations, &o.sheet.validations, fwd));
@@ -428,6 +478,16 @@ pub fn sheet_object_changes(id: &str, b: Side, o: Side, fwd: &SheetMap, inv: &Sh
             format!("{:?}", o.sheet.visibility).to_lowercase(),
         )];
         out.push(c);
+    }
+    // Several objects can share a location (two rules on one range); their
+    // ids stay unique, and stable as long as the rules keep their order.
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    for c in &mut out {
+        let n = seen.entry(c.id.clone()).or_default();
+        *n += 1;
+        if *n > 1 {
+            c.id = format!("{}#{n}", c.id);
+        }
     }
     out
 }

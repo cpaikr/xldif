@@ -4,7 +4,7 @@
 //!
 //! Formatting resolution, comments, and other objects arrive in M3.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
@@ -52,6 +52,13 @@ struct Budget {
 }
 
 impl Budget {
+    fn take_n(&mut self, n: usize) -> Result<(), Error> {
+        for _ in 0..n.min(self.left.saturating_add(1)) {
+            self.take()?;
+        }
+        Ok(())
+    }
+
     fn take(&mut self) -> Result<(), Error> {
         self.left = self.left.checked_sub(1).ok_or_else(|| {
             Error::new(ErrorCode::InvalidArchive, format!("the workbook has more than {} records", self.limit))
@@ -104,7 +111,7 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
     let rels = pkg.relationships(&workbook_part)?;
     let by_id: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
 
-    let shared = match rels.iter().find(|r| r.kind == "sharedStrings") {
+    let shared = match rels.iter().find(|r| r.kind == "sharedStrings" && !r.external) {
         Some(rel) => match pkg.read_text(&rel.target)? {
             Some(text) => parse_shared_strings(&text, &rel.target, &mut budget)?,
             None => Vec::new(),
@@ -112,21 +119,21 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         None => Vec::new(),
     };
 
-    let styles = match rels.iter().find(|r| r.kind == "styles") {
+    let styles = match rels.iter().find(|r| r.kind == "styles" && !r.external) {
         Some(rel) => match pkg.read_text(&rel.target)? {
-            Some(text) => crate::styles::parse_styles(&text, &rel.target)?,
+            Some(text) => crate::styles::parse_styles(&text, &rel.target, &mut budget.left)?,
             None => crate::styles::Styles::default(),
         },
         None => crate::styles::Styles::default(),
     };
 
-    let read_hashed = |pkg: &mut Package<R>, kind: &str| -> Result<Option<u64>, Error> {
-        match rels.iter().find(|r| r.kind == kind && !r.external) {
-            Some(rel) => Ok(pkg.read_text(&rel.target)?.map(|t| crate::align::fnv(&[t.as_bytes()]))),
-            None => Ok(None),
-        }
+    let theme = match rels.iter().find(|r| r.kind == "theme" && !r.external) {
+        Some(rel) => match pkg.read_text(&rel.target)? {
+            Some(text) => Some(theme_colors(&text, &rel.target)?),
+            None => None,
+        },
+        None => None,
     };
-    let theme = read_hashed(pkg, "theme")?;
     let people = match rels.iter().find(|r| r.kind == "person" && !r.external) {
         Some(rel) => match pkg.read_text(&rel.target)? {
             Some(text) => crate::sheet_objects::persons(&text, &rel.target)?,
@@ -165,7 +172,8 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         match (text, rel) {
             (Some(text), Some(rel)) if kind != SheetKind::Chartsheet => {
                 let sheet_rels = pkg.relationships(&rel.target)?;
-                parse_sheet(&text, &rel.target, &shared, &sheet_rels, &mut sheet, &mut budget, &mut warnings)?;
+                let context = SheetContext { shared: &shared, rels: &sheet_rels, styles: &styles };
+                parse_sheet(&text, &rel.target, &context, &mut sheet, &mut budget, &mut warnings)?;
                 read_comments(pkg, &sheet_rels, &people, &mut sheet)?;
             }
             (None, _) => warnings.push(Warning {
@@ -314,7 +322,7 @@ fn read_comments<R: Read + Seek>(
     people: &HashMap<String, String>,
     sheet: &mut Sheet,
 ) -> Result<(), Error> {
-    let mut threads = Vec::new();
+    let mut threads: Vec<crate::model::Comment> = Vec::new();
     for rel in rels.iter().filter(|r| r.kind == "threadedComment" && !r.external) {
         if let Some(text) = pkg.read_text(&rel.target)? {
             threads.extend(crate::sheet_objects::threaded_comments(&text, &rel.target, people)?);
@@ -323,9 +331,8 @@ fn read_comments<R: Read + Seek>(
     for rel in rels.iter().filter(|r| r.kind == "comments" && !r.external) {
         if let Some(text) = pkg.read_text(&rel.target)? {
             let notes = crate::sheet_objects::legacy_comments(&text, &rel.target)?;
-            sheet
-                .comments
-                .extend(notes.into_iter().filter(|n| !threads.iter().any(|t| (t.row, t.col) == (n.row, n.col))));
+            let threaded: HashSet<(u32, u32)> = threads.iter().map(|t| (t.row, t.col)).collect();
+            sheet.comments.extend(notes.into_iter().filter(|n| !threaded.contains(&(n.row, n.col))));
         }
     }
     sheet.comments.extend(threads);
@@ -333,11 +340,34 @@ fn read_comments<R: Read + Seek>(
     Ok(())
 }
 
+/// What a sheet part refers to outside itself.
+struct SheetContext<'a> {
+    shared: &'a [Arc<str>],
+    rels: &'a [Relationship],
+    styles: &'a crate::styles::Styles,
+}
+
+/// The theme's color scheme as one fingerprint: each named slot and its
+/// color. Other parts of the theme (fonts, effects, generator-specific
+/// extensions) differ between writers without changing what cells look like.
+fn theme_colors(text: &str, part: &str) -> Result<u64, Error> {
+    let mut p = Parser::new(text, part);
+    loop {
+        match p.next()? {
+            Event::Start(e) if e.name == "clrScheme" => {
+                let described = p.describe_rest()?;
+                return Ok(crate::align::fnv(&[described.as_bytes()]));
+            }
+            Event::Eof => return Ok(0),
+            _ => {}
+        }
+    }
+}
+
 fn parse_sheet(
     text: &str,
     part: &str,
-    shared: &[Arc<str>],
-    rels: &[Relationship],
+    context: &SheetContext<'_>,
     sheet: &mut Sheet,
     budget: &mut Budget,
     warnings: &mut Vec<Warning>,
@@ -398,7 +428,7 @@ fn parse_sheet(
                     let style = e.attr("s").and_then(|s| s.parse().ok()).unwrap_or(0);
                     let kind = e.attr("t").unwrap_or("n").to_owned();
                     let raw = parse_cell_children(&mut p)?;
-                    let value = match type_value(&kind, raw.value, raw.inline, shared) {
+                    let value = match type_value(&kind, raw.value, raw.inline, context.shared) {
                         Ok(v) => v,
                         Err(raw) => {
                             bad_values += 1;
@@ -426,17 +456,19 @@ fn parse_sheet(
                 "hyperlink" => {
                     budget.take()?;
                     if let Some(range) = e.attr("ref").and_then(crate::cellref::Range::parse) {
-                        let target = crate::sheet_objects::hyperlink_target(&e, rels);
+                        let target = crate::sheet_objects::hyperlink_target(&e, context.rels);
                         sheet.hyperlinks.push(crate::model::Hyperlink { range, target });
                     }
                 }
                 "dataValidation" => {
-                    budget.take()?;
-                    sheet.validations.push(crate::sheet_objects::data_validation(&e, &mut p)?);
+                    let rule = crate::sheet_objects::data_validation(&e, &mut p)?;
+                    budget.take_n(1 + rule.ranges.len())?;
+                    sheet.validations.push(rule);
                 }
                 "conditionalFormatting" => {
-                    budget.take()?;
-                    sheet.conditional_formats.extend(crate::sheet_objects::conditional_formatting(&e, &mut p)?);
+                    let rules = crate::sheet_objects::conditional_formatting(&e, &mut p, context.styles)?;
+                    budget.take_n(1 + rules.len() + rules.first().map_or(0, |r| r.ranges.len()))?;
+                    sheet.conditional_formats.extend(rules);
                 }
                 _ => p.skip_element()?,
             },
@@ -447,6 +479,9 @@ fn parse_sheet(
     }
     finish(row.take(), &mut sheet.rows);
     normalize(&mut sheet.rows);
+    // Layout lookups binary-search by first line.
+    sheet.layout.rows.sort_by_key(|l| l.index);
+    sheet.layout.cols.sort_by_key(|l| l.index);
     expand_shared_formulas(&mut sheet.rows, budget)?;
     if bad_values > 0 {
         warnings.push(Warning {

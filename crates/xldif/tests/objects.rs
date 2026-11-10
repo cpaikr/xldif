@@ -147,3 +147,111 @@ checked twice"
     let name = &of_kind(&c, Kind::Name)[0];
     assert_eq!(name.properties[0].other, "Notes!$A$2");
 }
+
+fn pair(make: impl Fn(&mut Workbook, bool)) -> Comparison {
+    let build = |later: bool| {
+        let mut wb = Workbook::new();
+        make(&mut wb, later);
+        read_bytes(wb.save_to_buffer().unwrap()).unwrap()
+    };
+    compare("a", &build(false), "b", &build(true), CompareOptions::default())
+}
+
+#[test]
+fn conditional_formats_compare_their_style_not_its_index() {
+    // The fill a rule applies changes: one rule change.
+    let c = pair(|wb, later| {
+        let ws = wb.add_worksheet();
+        ws.write_number(0, 0, 1).unwrap();
+        let color = if later { Color::Green } else { Color::Yellow };
+        let cf = ConditionalFormatCell::new()
+            .set_rule(ConditionalFormatCellRule::GreaterThan(0))
+            .set_format(Format::new().set_background_color(color));
+        ws.add_conditional_format(0, 0, 4, 0, &cf).unwrap();
+    });
+    assert_eq!(of_kind(&c, Kind::ConditionalFormat).len(), 1);
+    // A rule added on the first sheet renumbers the second sheet's style
+    // index; the second sheet's unchanged rule is not a change.
+    let c = pair(|wb, later| {
+        let red = || {
+            ConditionalFormatCell::new()
+                .set_rule(ConditionalFormatCellRule::LessThan(0))
+                .set_format(Format::new().set_font_color(Color::Red))
+        };
+        let first = wb.add_worksheet();
+        first.write_number(0, 0, 1).unwrap();
+        if later {
+            first.add_conditional_format(0, 0, 0, 0, &red().set_format(Format::new().set_bold())).unwrap();
+        }
+        let second = wb.add_worksheet();
+        second.write_number(0, 0, 1).unwrap();
+        second.add_conditional_format(0, 0, 0, 0, &red()).unwrap();
+    });
+    let cf = of_kind(&c, Kind::ConditionalFormat);
+    assert_eq!(cf.len(), 1, "{cf:?}");
+    assert_eq!(cf[0].status, Status::OnlyOther);
+}
+
+#[test]
+fn row_and_column_styles_and_sizes_are_compared_and_counted() {
+    let c = pair(|wb, later| {
+        let ws = wb.add_worksheet();
+        ws.write_number(0, 0, 1).unwrap();
+        let fill = Format::new().set_background_color(if later { Color::Green } else { Color::Yellow });
+        ws.set_column_format(3, &fill).unwrap();
+        ws.set_row_format(5, &fill).unwrap();
+        ws.set_row_height(8, if later { 30 } else { 20 }).unwrap();
+    });
+    let rows = of_kind(&c, Kind::Row);
+    let cols = of_kind(&c, Kind::Column);
+    assert!(cols.iter().any(|x| x.properties.iter().any(|p| p.name == "style.fill.fg")), "{cols:?}");
+    assert!(rows.iter().any(|x| x.properties.iter().any(|p| p.name == "style.fill.fg")), "{rows:?}");
+    assert!(rows.iter().any(|x| x.properties.iter().any(|p| p.name == "height")), "{rows:?}");
+    assert_eq!((c.summary.rows_changed, c.summary.columns_changed), (rows.len(), cols.len()));
+}
+
+#[test]
+fn rules_on_one_range_keep_unique_ids_and_edits_are_edits() {
+    let c = pair(|wb, later| {
+        let ws = wb.add_worksheet();
+        ws.write_number(0, 0, 1).unwrap();
+        if !later {
+            for n in [1, 2] {
+                let cf = ConditionalFormatCell::new()
+                    .set_rule(ConditionalFormatCellRule::GreaterThan(n))
+                    .set_format(Format::new().set_bold());
+                ws.add_conditional_format(0, 0, 4, 0, &cf).unwrap();
+            }
+        }
+        // Two links whose targets each move on by one.
+        let (a, b) = if later { ("https://x/2", "https://x/3") } else { ("https://x/1", "https://x/2") };
+        ws.write_string(1, 0, "first").unwrap();
+        ws.write_string(2, 0, "second").unwrap();
+        ws.write_url_with_text(1, 1, a, "link").unwrap();
+        ws.write_url_with_text(2, 1, b, "link").unwrap();
+    });
+    let ids: Vec<&str> = c.sheets[0].changes.iter().map(|x| x.id.as_str()).collect();
+    let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+    assert_eq!(unique.len(), ids.len(), "{ids:?}");
+    let links = of_kind(&c, Kind::Hyperlink);
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert!(links.iter().all(|l| l.status == Status::Changed && l.properties[0].name == "rule"), "{links:?}");
+}
+
+#[test]
+fn many_custom_row_heights_compare_quickly() {
+    let build = || {
+        let mut wb = Workbook::new();
+        let ws = wb.add_worksheet();
+        for r in 0..20_000 {
+            ws.set_row_height(r, 18).unwrap();
+        }
+        ws.write_number(0, 0, 1).unwrap();
+        read_bytes(wb.save_to_buffer().unwrap()).unwrap()
+    };
+    let (a, b) = (build(), build());
+    let start = std::time::Instant::now();
+    let c = compare("a", &a, "b", &b, CompareOptions::default());
+    assert!(c.sheets[0].changes.is_empty());
+    assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}

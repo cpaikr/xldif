@@ -172,7 +172,8 @@ pub struct Comment {
 /// rule described as one comparable string.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RangeRule {
-    pub ranges: Vec<crate::cellref::Range>,
+    /// Shared by every rule of one `<conditionalFormatting>`.
+    pub ranges: std::sync::Arc<[crate::cellref::Range]>,
     pub rule: String,
 }
 

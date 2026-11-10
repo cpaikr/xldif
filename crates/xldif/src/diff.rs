@@ -276,6 +276,10 @@ pub struct Summary {
     pub columns_only_base: usize,
     pub columns_only_other: usize,
     pub columns_moved: usize,
+    /// Rows whose height, hidden state, or row style changed.
+    pub rows_changed: usize,
+    /// Columns whose width, hidden state, or column style changed.
+    pub columns_changed: usize,
     pub value: usize,
     /// Formula changes, counting a folded run once.
     pub formula: usize,
@@ -513,6 +517,8 @@ fn summarize(sheets: &[SheetComparison]) -> Summary {
                 (Kind::Column, Status::OnlyBase) => s.columns_only_base += 1,
                 (Kind::Column, Status::OnlyOther) => s.columns_only_other += 1,
                 (Kind::Column, Status::Moved) => s.columns_moved += 1,
+                (Kind::Row, Status::Changed) => s.rows_changed += 1,
+                (Kind::Column, Status::Changed) => s.columns_changed += 1,
                 _ => {}
             }
         }

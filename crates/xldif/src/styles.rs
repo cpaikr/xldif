@@ -75,6 +75,8 @@ pub struct Font {
     /// `single`, `double`, `singleAccounting`, …; empty for none.
     pub underline: String,
     pub strike: bool,
+    /// `superscript` or `subscript`; empty for the baseline.
+    pub vert_align: String,
     pub color: Color,
 }
 
@@ -100,6 +102,8 @@ pub struct Border {
     pub top: Edge,
     pub bottom: Edge,
     pub diagonal: Edge,
+    pub diagonal_up: bool,
+    pub diagonal_down: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -143,6 +147,7 @@ impl CellFormat {
             ("font.italic", flag(f.italic)),
             ("font.underline", text(&f.underline)),
             ("font.strike", flag(f.strike)),
+            ("font.vertAlign", text(&f.vert_align)),
             ("font.color", f.color.to_string()),
             ("fill.pattern", text(&self.fill.pattern)),
             ("fill.fg", self.fill.fg.to_string()),
@@ -152,6 +157,8 @@ impl CellFormat {
             ("border.top", edge(&self.border.top)),
             ("border.bottom", edge(&self.border.bottom)),
             ("border.diagonal", edge(&self.border.diagonal)),
+            ("border.diagonalUp", flag(self.border.diagonal_up)),
+            ("border.diagonalDown", flag(self.border.diagonal_down)),
             ("alignment.horizontal", text(&self.alignment.horizontal)),
             ("alignment.vertical", text(&self.alignment.vertical)),
             ("alignment.wrap", flag(self.alignment.wrap)),
@@ -175,17 +182,59 @@ impl CellFormat {
     }
 }
 
-/// The resolved cell formats of a workbook, by `cellXfs` index.
+/// A workbook's style tables. Cell formats are resolved on demand from the
+/// tables, so a long font name shared by many formats is stored once.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Styles {
-    pub formats: Vec<CellFormat>,
+    num_fmts: Vec<(u32, String)>,
+    fonts: Vec<Font>,
+    fills: Vec<Fill>,
+    borders: Vec<Border>,
+    xfs: Vec<Xf>,
+    style_names: Vec<(usize, String)>,
+    /// Differential formats (the styles conditional formatting applies),
+    /// each described canonically so they compare by content, not index.
+    pub dxfs: Vec<String>,
 }
 
 impl Styles {
-    /// The format of style index `s`; index 0 (or an index past the table)
-    /// falls back to the first format, then to defaults.
+    /// How many cell formats the workbook defines.
+    pub fn len(&self) -> usize {
+        self.xfs.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.xfs.is_empty()
+    }
+
+    /// The format of style index `s`; an index past the table falls back to
+    /// the first format, then to defaults.
     pub fn format(&self, s: u32) -> CellFormat {
-        self.formats.get(s as usize).or_else(|| self.formats.first()).cloned().unwrap_or_default()
+        let Some(xf) = self.xfs.get(s as usize).or_else(|| self.xfs.first()) else { return CellFormat::default() };
+        CellFormat {
+            number_format: self
+                .num_fmts
+                .iter()
+                .find(|(n, _)| *n == xf.num_fmt)
+                .map_or_else(|| builtin_number_format(xf.num_fmt), |(_, code)| code.clone()),
+            font: self.fonts.get(xf.font).cloned().unwrap_or_default(),
+            fill: self.fills.get(xf.fill).cloned().unwrap_or_default(),
+            border: self.borders.get(xf.border).cloned().unwrap_or_default(),
+            alignment: xf.alignment.clone(),
+            locked: xf.locked,
+            hidden: xf.hidden,
+            style: xf
+                .parent
+                .and_then(|parent| self.style_names.iter().find(|(x, _)| *x == parent))
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The description of differential format `id`, or a marker when the
+    /// index is past the table.
+    pub fn dxf(&self, id: usize) -> String {
+        self.dxfs.get(id).cloned().unwrap_or_else(|| format!("missing dxf {id}"))
     }
 }
 
@@ -228,7 +277,7 @@ fn builtin_number_format(id: u32) -> String {
 }
 
 /// One `<xf>` as written: indexes into the other tables.
-#[derive(Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Xf {
     num_fmt: u32,
     font: usize,
@@ -264,6 +313,7 @@ fn read_font(p: &mut Parser<'_>) -> Result<Font, Error> {
                     "i" => font.italic = val.is_none_or(|v| v != "0" && v != "false"),
                     "strike" => font.strike = val.is_none_or(|v| v != "0" && v != "false"),
                     "u" => val.unwrap_or("single").clone_into(&mut font.underline),
+                    "vertAlign" => val.unwrap_or_default().clone_into(&mut font.vert_align),
                     "color" => font.color = color(&e),
                     _ => {}
                 }
@@ -275,6 +325,9 @@ fn read_font(p: &mut Parser<'_>) -> Result<Font, Error> {
     }
     if font.underline == "none" {
         font.underline.clear();
+    }
+    if font.vert_align == "baseline" {
+        font.vert_align.clear();
     }
     Ok(font)
 }
@@ -306,8 +359,12 @@ fn read_fill(p: &mut Parser<'_>) -> Result<Fill, Error> {
     Ok(fill)
 }
 
-fn read_border(p: &mut Parser<'_>) -> Result<Border, Error> {
-    let mut border = Border::default();
+fn read_border(e: &Element, p: &mut Parser<'_>) -> Result<Border, Error> {
+    let mut border = Border {
+        diagonal_up: truthy(e.attr("diagonalUp")),
+        diagonal_down: truthy(e.attr("diagonalDown")),
+        ..Border::default()
+    };
     let mut depth = 1;
     let mut edge: Option<String> = None;
     while depth > 0 {
@@ -403,84 +460,82 @@ fn read_xf(e: &Element, p: &mut Parser<'_>, nested: bool) -> Result<Xf, Error> {
     Ok(xf)
 }
 
-/// Parses `styles.xml` into resolved cell formats.
-pub fn parse_styles(text: &str, part: &str) -> Result<Styles, Error> {
+/// Parses `styles.xml` into its tables. Every entry (number format, font,
+/// fill, border, format, differential format, named style) counts against
+/// `budget`, so a small file cannot declare an unbounded table.
+pub fn parse_styles(text: &str, part: &str, budget: &mut usize) -> Result<Styles, Error> {
     let mut p = Parser::new(text, part);
-    let mut num_fmts: Vec<(u32, String)> = Vec::new();
-    let mut fonts = Vec::new();
-    let mut fills = Vec::new();
-    let mut borders = Vec::new();
-    let mut style_xfs: Vec<Xf> = Vec::new();
-    let mut cell_xfs: Vec<Xf> = Vec::new();
-    let mut style_names: Vec<(usize, String)> = Vec::new();
-    // Which list an `<xf>` belongs to.
+    let mut styles = Styles::default();
+    let mut take = || -> Result<(), Error> {
+        *budget = budget.checked_sub(1).ok_or_else(|| {
+            Error::new(crate::ErrorCode::InvalidArchive, format!("{part} defines more styles than xldif reads"))
+        })?;
+        Ok(())
+    };
+    // Which list an element belongs to.
     let mut section = "";
     loop {
         match p.next()? {
             Event::Start(e) => match e.name.as_str() {
                 "numFmt" => {
+                    take()?;
                     if let Some(id) = e.attr("numFmtId").and_then(|v| v.parse().ok()) {
-                        num_fmts.push((id, e.attr("formatCode").unwrap_or_default().to_owned()));
+                        styles.num_fmts.push((id, e.attr("formatCode").unwrap_or_default().to_owned()));
                     }
                 }
-                "font" if section == "fonts" => fonts.push(read_font(&mut p)?),
-                "fill" if section == "fills" => fills.push(read_fill(&mut p)?),
-                "border" if section == "borders" => borders.push(read_border(&mut p)?),
+                "font" if section == "fonts" => {
+                    take()?;
+                    styles.fonts.push(read_font(&mut p)?);
+                }
+                "fill" if section == "fills" => {
+                    take()?;
+                    styles.fills.push(read_fill(&mut p)?);
+                }
+                "border" if section == "borders" => {
+                    take()?;
+                    styles.borders.push(read_border(&e, &mut p)?);
+                }
+                "dxf" if section == "dxfs" => {
+                    take()?;
+                    styles.dxfs.push(p.describe_rest()?);
+                }
                 "xf" => {
+                    take()?;
                     // Self-closing <xf/> ends at once; read_xf consumes children otherwise.
                     let xf = read_xf(&e, &mut p, true)?;
-                    match section {
-                        "cellStyleXfs" => style_xfs.push(xf),
-                        "cellXfs" => cell_xfs.push(xf),
-                        _ => {}
+                    if section == "cellXfs" {
+                        styles.xfs.push(xf);
                     }
                 }
                 "cellStyle" => {
+                    take()?;
                     if let Some(xf) = e.attr("xfId").and_then(|v| v.parse().ok()) {
-                        style_names.push((xf, e.attr("name").unwrap_or_default().to_owned()));
+                        styles.style_names.push((xf, e.attr("name").unwrap_or_default().to_owned()));
                     }
                 }
-                "fonts" | "fills" | "borders" | "cellStyleXfs" | "cellXfs" => {
+                "fonts" | "fills" | "borders" | "cellStyleXfs" | "cellXfs" | "dxfs" => {
                     section = match e.name.as_str() {
                         "fonts" => "fonts",
                         "fills" => "fills",
                         "borders" => "borders",
                         "cellStyleXfs" => "cellStyleXfs",
+                        "dxfs" => "dxfs",
                         _ => "cellXfs",
                     };
                 }
-                // Differential formats belong to conditional formatting (M3 objects).
-                "dxfs" | "extLst" | "tableStyles" | "colors" => p.skip_element()?,
+                "extLst" | "tableStyles" | "colors" => p.skip_element()?,
                 _ => {}
             },
-            Event::End(name) if matches!(name.as_str(), "fonts" | "fills" | "borders" | "cellStyleXfs" | "cellXfs") => {
+            Event::End(name)
+                if matches!(name.as_str(), "fonts" | "fills" | "borders" | "cellStyleXfs" | "cellXfs" | "dxfs") =>
+            {
                 section = "";
             }
             Event::Eof => break,
             _ => {}
         }
     }
-    let number_format = |id: u32| {
-        num_fmts.iter().find(|(n, _)| *n == id).map_or_else(|| builtin_number_format(id), |(_, code)| code.clone())
-    };
-    let formats = cell_xfs
-        .iter()
-        .map(|xf| CellFormat {
-            number_format: number_format(xf.num_fmt),
-            font: fonts.get(xf.font).cloned().unwrap_or_default(),
-            fill: fills.get(xf.fill).cloned().unwrap_or_default(),
-            border: borders.get(xf.border).cloned().unwrap_or_default(),
-            alignment: xf.alignment.clone(),
-            locked: xf.locked,
-            hidden: xf.hidden,
-            style: xf
-                .parent
-                .and_then(|parent| style_names.iter().find(|(x, _)| *x == parent))
-                .map(|(_, n)| n.clone())
-                .unwrap_or_default(),
-        })
-        .collect();
-    Ok(Styles { formats })
+    Ok(styles)
 }
 
 #[cfg(test)]
@@ -514,8 +569,9 @@ mod tests {
 
     #[test]
     fn cell_formats_resolve_every_property() {
-        let styles = parse_styles(STYLES, "styles.xml").unwrap();
-        assert_eq!(styles.formats.len(), 3);
+        let styles = parse_styles(STYLES, "styles.xml", &mut 1000).unwrap();
+        assert_eq!(styles.len(), 3);
+        assert_eq!(styles.dxfs, ["font{b{}}"]);
         let plain = styles.format(0);
         assert_eq!((plain.number_format.as_str(), plain.font.name.as_str()), ("General", "Calibri"));
         assert_eq!(plain.font.color, Color::Theme { index: 1, tint: String::new() });
@@ -539,8 +595,13 @@ mod tests {
     }
 
     #[test]
+    fn style_tables_count_against_the_budget() {
+        assert!(parse_styles(STYLES, "styles.xml", &mut 5).is_err());
+    }
+
+    #[test]
     fn differences_name_each_property() {
-        let styles = parse_styles(STYLES, "styles.xml").unwrap();
+        let styles = parse_styles(STYLES, "styles.xml", &mut 1000).unwrap();
         let diff = styles.format(0).differences(&styles.format(2));
         assert_eq!(diff, [("numberFormat", "General".to_owned(), "mm-dd-yy".to_owned())]);
         assert!(styles.format(1).differences(&styles.format(1)).is_empty());

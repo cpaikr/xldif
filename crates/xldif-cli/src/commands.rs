@@ -261,7 +261,7 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
     let s = &l.summary;
     let _ = writeln!(
         out,
-        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other, {} renamed; rows +{} -{} moved {}; columns +{} -{} moved {}; {} value change(s)",
+        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other, {} renamed; rows +{} -{} moved {} restyled {}; columns +{} -{} moved {} restyled {}; {} value, {} formula, {} format, {} object change(s)",
         escape(&l.base.file),
         escape(&l.other.file),
         s.sheets_changed,
@@ -271,10 +271,15 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
         s.rows_only_other,
         s.rows_only_base,
         s.rows_moved,
+        s.rows_changed,
         s.columns_only_other,
         s.columns_only_base,
         s.columns_moved,
-        s.value
+        s.columns_changed,
+        s.value,
+        s.formula,
+        s.format,
+        s.objects
     );
     for sheet in &l.sheets {
         let name = match (&sheet.base, &sheet.other) {

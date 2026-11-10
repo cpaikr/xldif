@@ -7,6 +7,8 @@
 
 use quick_xml::escape::resolve_xml_entity;
 use quick_xml::events::{BytesStart, Event as QEvent};
+use std::fmt::Write as _;
+
 use quick_xml::{Reader, XmlVersion};
 
 use crate::{Error, ErrorCode};
@@ -189,6 +191,45 @@ impl<'a> Parser<'a> {
                 Event::Text(t) => {
                     if skipping.is_none() && inside.is_some() {
                         out.push_str(&t);
+                    }
+                }
+                Event::Eof => return Err(self.error("unexpected end of part")),
+            }
+        }
+    }
+
+    /// A canonical description of the rest of the element just started:
+    /// each child as `name(attr=value,…){…}` with attributes sorted, and
+    /// text trimmed. Two elements written the same way, whatever their
+    /// attribute order or whitespace, describe the same.
+    pub fn describe_rest(&mut self) -> Result<String, Error> {
+        let mut out = String::new();
+        let mut depth = 1usize;
+        loop {
+            match self.next()? {
+                Event::Start(e) => {
+                    depth += 1;
+                    let mut attrs: Vec<String> = e.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                    attrs.sort();
+                    out.push_str(&e.name);
+                    if !attrs.is_empty() {
+                        out.push('(');
+                        out.push_str(&attrs.join(","));
+                        out.push(')');
+                    }
+                    out.push('{');
+                }
+                Event::End(_) => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(out);
+                    }
+                    out.push('}');
+                }
+                Event::Text(t) => {
+                    let t = t.trim();
+                    if !t.is_empty() {
+                        let _ = write!(out, "{t:?}");
                     }
                 }
                 Event::Eof => return Err(self.error("unexpected end of part")),
