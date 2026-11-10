@@ -1,0 +1,885 @@
+//! Content-aligned comparison of two workbooks (values only for now).
+//!
+//! Sheets pair by name, then unpaired sheets by content (a rename). Inside a
+//! sheet pair, columns align first (by header text and value overlap), then
+//! rows align by their label and their values in the aligned columns, so an
+//! inserted column cannot break row matching and an inserted row is one
+//! change. Values are compared on paired rows × paired columns; cells in
+//! inserted or deleted rows and columns are covered by that row or column
+//! change, not listed one by one.
+//!
+//! Formulas (M2), formatting, and workbook objects (M3) are not compared yet.
+
+use std::collections::{HashMap, HashSet};
+
+use serde::Serialize;
+
+use crate::align::{self, Alignment, Item, Options};
+use crate::cellref::{cell_name, col_name};
+use crate::model::{Cell, Row, Sheet, Value, Warning, Workbook};
+use crate::views::{JsonValue, json_value, stale_value_warnings};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlignMode {
+    /// Match rows and columns by content (the default).
+    Content,
+    /// Compare A1 with A1.
+    Position,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompareOptions {
+    /// Numbers closer than this are equal.
+    pub tolerance: f64,
+    pub align: AlignMode,
+}
+
+impl Default for CompareOptions {
+    fn default() -> Self {
+        Self { tolerance: 0.0, align: AlignMode::Content }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Status {
+    Same,
+    Changed,
+    OnlyBase,
+    OnlyOther,
+    Moved,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Kind {
+    Value,
+    Row,
+    Column,
+}
+
+impl Kind {
+    pub const ALL: [Self; 3] = [Self::Value, Self::Row, Self::Column];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Value => "value",
+            Self::Row => "row",
+            Self::Column => "column",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Location {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cell: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<JsonValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Labels {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<String>,
+    /// The base side's row label, when it differs from `row`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_row: Option<String>,
+    /// Labels are found by looking left and up from the cell; they are a
+    /// reading aid, not part of the comparison.
+    pub inferred: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Change {
+    /// Derived from the change's location, so it is stable across filters,
+    /// limits, and reruns: `s<sheet>:<kind>:<base ref>:<other ref>`.
+    pub id: String,
+    pub kind: Kind,
+    pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<Location>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<Location>,
+    /// `other - base`, for two numbers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub labels: Option<Labels>,
+}
+
+/// `[base start, other start, length]`.
+pub type Run = [u32; 3];
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlignmentView {
+    /// `content`, or `position` when asked for with `--align position`.
+    pub method: &'static str,
+    /// Part of the sheet was too large to align by content and was paired
+    /// by position instead.
+    pub fell_back: bool,
+    /// Runs of paired rows by row number. Rows not covered are listed as
+    /// `row` changes (or are blank).
+    pub rows: Vec<Run>,
+    pub row_moves: Vec<Run>,
+    /// Runs of paired columns by column number (1 = A).
+    pub cols: Vec<Run>,
+    pub col_moves: Vec<Run>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SheetComparison {
+    /// `s<n>`: base sheets in order, then sheets only in the other book.
+    pub id: String,
+    pub status: Status,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub other: Option<String>,
+    /// Paired by content under a different name.
+    pub renamed: bool,
+    /// Its position among the paired sheets changed.
+    pub moved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alignment: Option<AlignmentView>,
+    pub changes: Vec<Change>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Side {
+    pub file: String,
+    pub sheets: usize,
+    pub date1904: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Summary {
+    pub sheets_changed: usize,
+    pub sheets_only_base: usize,
+    pub sheets_only_other: usize,
+    pub sheets_renamed: usize,
+    pub rows_only_base: usize,
+    pub rows_only_other: usize,
+    pub rows_moved: usize,
+    pub columns_only_base: usize,
+    pub columns_only_other: usize,
+    pub columns_moved: usize,
+    pub value: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Comparison {
+    pub base: Side,
+    pub other: Side,
+    pub summary: Summary,
+    pub sheets: Vec<SheetComparison>,
+    #[serde(skip)]
+    pub warnings: Vec<Warning>,
+}
+
+pub fn compare(
+    base_file: &str,
+    base: &Workbook,
+    other_file: &str,
+    other: &Workbook,
+    options: CompareOptions,
+) -> Comparison {
+    let mut warnings = Vec::new();
+    for (side, book) in [("base", base), ("other", other)] {
+        for w in book.warnings.iter().cloned().chain(stale_value_warnings(book)) {
+            warnings.push(Warning { code: w.code, message: format!("{side}: {}", w.message) });
+        }
+    }
+    if base.date1904 != other.date1904 {
+        warnings.push(Warning {
+            code: "date_system_mismatch",
+            message: "the workbooks use different date systems (1900 and 1904), so equal dates have different serial \
+                      numbers"
+                .to_owned(),
+        });
+    }
+
+    let pairs = pair_sheets(base, other);
+    let moved = moved_sheets(&pairs);
+    let mut sheets = Vec::new();
+    let mut paired_other = vec![false; other.sheets.len()];
+    for (bi, b) in base.sheets.iter().enumerate() {
+        let id = format!("s{}", sheets.len());
+        if let Some(&(_, oi, renamed)) = pairs.iter().find(|p| p.0 == bi) {
+            paired_other[oi] = true;
+            let o = &other.sheets[oi];
+            let (alignment, changes, fell_back) = compare_sheets(&id, b, o, options);
+            if fell_back {
+                warnings.push(Warning {
+                    code: "alignment_fallback",
+                    message: format!(
+                        "sheet {:?}: part of the sheet was too large to align by content and was \
+                                      compared by position",
+                        b.name
+                    ),
+                });
+            }
+            let is_moved = moved.contains(&bi);
+            let status = if changes.is_empty() && !renamed && !is_moved { Status::Same } else { Status::Changed };
+            sheets.push(SheetComparison {
+                id,
+                status,
+                base: Some(b.name.clone()),
+                other: Some(o.name.clone()),
+                renamed,
+                moved: is_moved,
+                alignment: Some(alignment),
+                changes,
+            });
+        } else {
+            sheets.push(lone_sheet(id, Status::OnlyBase, &b.name));
+        }
+    }
+    for (oi, o) in other.sheets.iter().enumerate() {
+        if !paired_other[oi] {
+            let id = format!("s{}", sheets.len());
+            sheets.push(lone_sheet(id, Status::OnlyOther, &o.name));
+        }
+    }
+    Comparison {
+        base: Side { file: base_file.to_owned(), sheets: base.sheets.len(), date1904: base.date1904 },
+        other: Side { file: other_file.to_owned(), sheets: other.sheets.len(), date1904: other.date1904 },
+        summary: summarize(&sheets),
+        sheets,
+        warnings,
+    }
+}
+
+fn lone_sheet(id: String, status: Status, name: &str) -> SheetComparison {
+    let (base, other) =
+        if status == Status::OnlyBase { (Some(name.to_owned()), None) } else { (None, Some(name.to_owned())) };
+    SheetComparison { id, status, base, other, renamed: false, moved: false, alignment: None, changes: Vec::new() }
+}
+
+fn summarize(sheets: &[SheetComparison]) -> Summary {
+    let mut s = Summary::default();
+    for sheet in sheets {
+        match sheet.status {
+            Status::OnlyBase => s.sheets_only_base += 1,
+            Status::OnlyOther => s.sheets_only_other += 1,
+            Status::Changed => s.sheets_changed += 1,
+            Status::Same | Status::Moved => {}
+        }
+        s.sheets_renamed += usize::from(sheet.renamed);
+        for c in &sheet.changes {
+            match (c.kind, c.status) {
+                (Kind::Value, _) => s.value += 1,
+                (Kind::Row, Status::OnlyBase) => s.rows_only_base += 1,
+                (Kind::Row, Status::OnlyOther) => s.rows_only_other += 1,
+                (Kind::Row, Status::Moved) => s.rows_moved += 1,
+                (Kind::Column, Status::OnlyBase) => s.columns_only_base += 1,
+                (Kind::Column, Status::OnlyOther) => s.columns_only_other += 1,
+                (Kind::Column, Status::Moved) => s.columns_moved += 1,
+                _ => {}
+            }
+        }
+    }
+    s
+}
+
+// ---------------------------------------------------------------------------
+// sheets
+
+/// A deterministic 64-bit FNV-1a hash, so tokens never depend on a random seed.
+fn fnv(parts: &[&[u8]]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for &b in *part {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+fn value_bytes(v: &Value) -> Option<Vec<u8>> {
+    Some(match v {
+        Value::Empty => return None,
+        Value::Number(n) => [b"n".as_slice(), &n.to_bits().to_le_bytes()].concat(),
+        Value::Text(t) if t.is_empty() => return None,
+        Value::Text(t) => [b"t".as_slice(), t.as_bytes()].concat(),
+        Value::Bool(b) => vec![b'b', u8::from(*b)],
+        Value::Error(e) => [b"e".as_slice(), e.as_bytes()].concat(),
+    })
+}
+
+/// A label made comparable: whitespace removed (Korean statements space out
+/// characters, as in "자 산 총 계"), case folded, and a leading outline
+/// marker dropped ("Ⅰ.", "(1)", "1.", "가."), since renumbering a section
+/// does not make its rows different rows.
+pub fn label_key(text: &str) -> Option<String> {
+    let compact: String = text.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
+    let key = strip_outline_marker(&compact);
+    let key = if key.is_empty() { compact.as_str() } else { key };
+    (!key.is_empty()).then(|| key.to_owned())
+}
+
+fn is_roman(c: char) -> bool {
+    ('\u{2160}'..='\u{217F}').contains(&c)
+}
+
+fn is_hangul_counter(c: char) -> bool {
+    "가나다라마바사아자차카타파하".contains(c)
+}
+
+/// Drops one leading outline marker: `(1)`, `(가)`, `1.`, `1)`, `가.`, `Ⅰ.`, or
+/// a bare Roman numeral directly before the label.
+fn strip_outline_marker(s: &str) -> &str {
+    if let Some(rest) = s.strip_prefix('(') {
+        if let Some(end) = rest.find(')') {
+            let inner = &rest[..end];
+            let counter =
+                inner.chars().all(|c| c.is_ascii_digit()) || inner.chars().all(|c| is_roman(c) || is_hangul_counter(c));
+            if !inner.is_empty() && inner.chars().count() <= 3 && counter {
+                return &rest[end + 1..];
+            }
+        }
+        return s;
+    }
+    let digits: usize = s.chars().take_while(char::is_ascii_digit).map(char::len_utf8).sum();
+    let romans: usize = s.chars().take_while(|c| is_roman(*c)).map(char::len_utf8).sum();
+    let hangul = s.chars().next().filter(|c| is_hangul_counter(*c)).map_or(0, char::len_utf8);
+    // Outline numbers stay short; "2025.12.31" is a date, not section 2025.
+    for (lead, max) in [(digits, 2), (romans, 9), (hangul, 3)] {
+        if lead == 0 || lead > max {
+            continue;
+        }
+        let rest = &s[lead..];
+        if let Some(stripped) = rest.strip_prefix('.').or_else(|| rest.strip_prefix(')')) {
+            return stripped;
+        }
+        if lead == romans && !rest.is_empty() {
+            return rest;
+        }
+    }
+    s
+}
+
+/// A number written as text, as exported statements do: "1,234", "(1,234)",
+/// "-12.5", "12%". `None` for anything else.
+pub fn numeric_text(text: &str) -> Option<f64> {
+    let t = text.trim();
+    let (negative, t) = match t.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
+        Some(inner) => (true, inner.trim()),
+        None => (false, t),
+    };
+    let (scale, t) = match t.strip_suffix('%') {
+        Some(x) => (0.01, x),
+        None => (1.0, t),
+    };
+    let digits: String = t.chars().filter(|c| *c != ',').collect();
+    if !digits.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let well_formed =
+        digits.chars().enumerate().all(|(i, c)| c.is_ascii_digit() || c == '.' || (i == 0 && (c == '-' || c == '+')));
+    if !well_formed {
+        return None;
+    }
+    let n: f64 = digits.parse().ok()?;
+    Some(if negative { -n } else { n } * scale)
+}
+
+fn display_label(text: &str) -> String {
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() > 60 { collapsed.chars().take(60).collect::<String>() + "…" } else { collapsed }
+}
+
+/// A cell's text as a column header: text that is not a number, or a year
+/// stored as a number (period headers often are).
+fn header_text(cell: &Cell) -> Option<String> {
+    match &cell.value {
+        Value::Number(n) if n.fract() == 0.0 && (1900.0..=2100.0).contains(n) => Some(format!("{n}")),
+        _ => text_of(cell).filter(|t| numeric_text(t).is_none()).map(display_label),
+    }
+}
+
+fn text_of(cell: &Cell) -> Option<&str> {
+    match &cell.value {
+        Value::Text(t) if !t.trim().is_empty() => Some(t),
+        _ => None,
+    }
+}
+
+/// Rows and columns of one sheet with content, for alignment.
+struct Grid<'a> {
+    sheet: &'a Sheet,
+    /// Content rows, in order.
+    rows: Vec<&'a Row>,
+    /// Columns with content, in order, each with its content cells by row.
+    cols: Vec<(u32, Vec<(u32, &'a Cell)>)>,
+}
+
+impl<'a> Grid<'a> {
+    fn new(sheet: &'a Sheet) -> Self {
+        let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(Cell::has_content)).collect();
+        let mut by_col: std::collections::BTreeMap<u32, Vec<(u32, &Cell)>> = std::collections::BTreeMap::new();
+        for row in &rows {
+            for cell in row.cells.iter().filter(|c| value_bytes(&c.value).is_some()) {
+                by_col.entry(cell.col).or_default().push((row.index, cell));
+            }
+        }
+        Self { sheet, rows, cols: by_col.into_iter().collect() }
+    }
+
+    fn cell(&self, row: u32, col: u32) -> Option<&'a Cell> {
+        let r = self.sheet.rows.binary_search_by_key(&row, |r| r.index).ok()?;
+        let cells = &self.sheet.rows[r].cells;
+        cells.binary_search_by_key(&col, |c| c.col).ok().map(|i| &cells[i])
+    }
+
+    /// The leftmost text cell of a row: its label.
+    fn row_label(row: &Row) -> Option<&str> {
+        row.cells.iter().find_map(text_of)
+    }
+
+    /// The nearest text cell above `row` in `col` that is not a number
+    /// written as text, within a few rows.
+    fn column_label(&self, row: u32, col: u32) -> Option<String> {
+        let below = self.sheet.rows.partition_point(|r| r.index < row);
+        self.sheet.rows[..below]
+            .iter()
+            .rev()
+            .take(30)
+            .find_map(|r| {
+                let cell = &r.cells[r.cells.binary_search_by_key(&col, |c| c.col).ok()?];
+                text_of(cell).filter(|t| numeric_text(t).is_none())
+            })
+            .map(display_label)
+            .or_else(|| self.column_header(col))
+    }
+
+    /// The first text in the top rows of `col` that is not a number.
+    fn column_header(&self, col: u32) -> Option<String> {
+        let (_, cells) = &self.cols[self.cols.binary_search_by_key(&col, |(c, _)| *c).ok()?];
+        let top: HashSet<u32> = self.rows.iter().take(10).map(|r| r.index).collect();
+        cells.iter().filter(|(r, _)| top.contains(r)).find_map(|(_, c)| header_text(c))
+    }
+
+    fn column_items(&self) -> Vec<Item> {
+        let header_rows: HashSet<u32> = self.rows.iter().take(10).map(|r| r.index).collect();
+        self.cols
+            .iter()
+            .map(|(_, cells)| {
+                let header: Vec<String> =
+                    cells.iter().filter(|(r, _)| header_rows.contains(r)).filter_map(|(_, c)| header_text(c)).collect();
+                let mut tokens: Vec<u64> =
+                    cells.iter().filter_map(|(_, c)| value_bytes(&c.value)).map(|b| fnv(&[&b])).collect();
+                tokens.sort_unstable();
+                Item { key: label_key(&header.join("/")), tokens, shape: 0 }
+            })
+            .collect()
+    }
+
+    /// Row items whose tokens tie each value to its aligned column, so a
+    /// value only counts as shared when it sits in the matching column.
+    fn row_items(&self, col_ids: &HashMap<u32, u32>) -> Vec<Item> {
+        self.rows
+            .iter()
+            .map(|row| {
+                let mut tokens = Vec::new();
+                let mut shape = Vec::new();
+                for c in &row.cells {
+                    let (Some(id), Some(bytes)) = (col_ids.get(&c.col), value_bytes(&c.value)) else { continue };
+                    tokens.push(fnv(&[&id.to_le_bytes(), &bytes]));
+                    shape.extend_from_slice(&id.to_le_bytes());
+                }
+                tokens.sort_unstable();
+                // Cells arrive in column order, so the shape needs no sorting.
+                let shape = if shape.is_empty() { 0 } else { fnv(&[&shape]) };
+                Item { key: Self::row_label(row).and_then(label_key), tokens, shape }
+            })
+            .collect()
+    }
+}
+
+/// `(base index, other index, renamed)` for each sheet pair.
+fn pair_sheets(base: &Workbook, other: &Workbook) -> Vec<(usize, usize, bool)> {
+    let mut pairs: Vec<(usize, usize, bool)> = Vec::new();
+    for (bi, b) in base.sheets.iter().enumerate() {
+        if let Some(oi) = other.sheets.iter().position(|o| o.name == b.name) {
+            pairs.push((bi, oi, false));
+        }
+    }
+    let tokens = |s: &Sheet| {
+        let mut t: Vec<u64> = s.cells().filter_map(|(_, c)| value_bytes(&c.value)).map(|b| fnv(&[&b])).collect();
+        t.sort_unstable();
+        Item { key: None, tokens: t, shape: 0 }
+    };
+    let lone_base: Vec<usize> = (0..base.sheets.len()).filter(|i| !pairs.iter().any(|p| p.0 == *i)).collect();
+    let lone_other: Vec<usize> = (0..other.sheets.len()).filter(|i| !pairs.iter().any(|p| p.1 == *i)).collect();
+    let base_items: Vec<Item> = lone_base.iter().map(|&i| tokens(&base.sheets[i])).collect();
+    let other_items: Vec<Item> = lone_other.iter().map(|&i| tokens(&other.sheets[i])).collect();
+    let mut candidates: Vec<(f64, usize, usize)> = Vec::new();
+    for (a, bi) in base_items.iter().zip(&lone_base) {
+        for (b, oi) in other_items.iter().zip(&lone_other) {
+            let s = align::similarity(a, b);
+            if s >= align::MIN_SIMILARITY {
+                candidates.push((s, *bi, *oi));
+            }
+        }
+    }
+    candidates.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
+    for (_, bi, oi) in candidates {
+        if !pairs.iter().any(|p| p.0 == bi || p.1 == oi) {
+            pairs.push((bi, oi, true));
+        }
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Base indexes of paired sheets outside the longest run kept in order.
+fn moved_sheets(pairs: &[(usize, usize, bool)]) -> HashSet<usize> {
+    let order: Vec<usize> = pairs.iter().map(|p| p.1).collect();
+    let keep: HashSet<usize> = align::longest_increasing(&order).into_iter().collect();
+    pairs.iter().enumerate().filter(|(k, _)| !keep.contains(k)).map(|(_, p)| p.0).collect()
+}
+
+fn same_value(a: &Value, b: &Value, tolerance: f64) -> bool {
+    match (a, b) {
+        // Values are finite, so a zero tolerance means exact equality.
+        (Value::Number(x), Value::Number(y)) => (x - y).abs() <= tolerance,
+        (Value::Text(x), Value::Empty) | (Value::Empty, Value::Text(x)) => x.is_empty(),
+        _ => a == b,
+    }
+}
+
+/// Runs of `(base, other)` pairs, by sheet row or column number, that keep a
+/// constant offset and have no one-sided item between them.
+fn runs(pairs: &[(u32, u32)], lone_base: &[u32], lone_other: &[u32]) -> Vec<Run> {
+    let between =
+        |lone: &[u32], lo: u32, hi: u32| lone.partition_point(|&x| x <= lo) < lone.partition_point(|&x| x < hi);
+    let mut out: Vec<Run> = Vec::new();
+    for &(b, o) in pairs {
+        if let Some(last) = out.last_mut() {
+            let (lb, lo) = (last[0] + last[2] - 1, last[1] + last[2] - 1);
+            if b > lb && b - lb == o.wrapping_sub(lo) && !between(lone_base, lb, b) && !between(lone_other, lo, o) {
+                last[2] += b - lb;
+                continue;
+            }
+        }
+        out.push([b, o, 1]);
+    }
+    out
+}
+
+struct Axis {
+    /// `(base number, other number)` pairs in order.
+    pairs: Vec<(u32, u32)>,
+    moves: Vec<(u32, u32)>,
+    lone_base: Vec<u32>,
+    lone_other: Vec<u32>,
+}
+
+impl Axis {
+    fn new(al: &Alignment, base: &[u32], other: &[u32]) -> Self {
+        let pairs: Vec<(u32, u32)> = al.pairs.iter().map(|&(i, j)| (base[i], other[j])).collect();
+        let moves: Vec<(u32, u32)> = al.moves.iter().map(|&(i, j)| (base[i], other[j])).collect();
+        let used_b: HashSet<u32> = pairs.iter().chain(&moves).map(|p| p.0).collect();
+        let used_o: HashSet<u32> = pairs.iter().chain(&moves).map(|p| p.1).collect();
+        let lone_base = base.iter().copied().filter(|x| !used_b.contains(x)).collect();
+        let lone_other = other.iter().copied().filter(|x| !used_o.contains(x)).collect();
+        Self { pairs, moves, lone_base, lone_other }
+    }
+
+    /// A1 against A1: every row or column number pairs with itself.
+    fn identity(base: &[u32], other: &[u32]) -> Self {
+        let all: std::collections::BTreeSet<u32> = base.iter().chain(other).copied().collect();
+        Self {
+            pairs: all.into_iter().map(|n| (n, n)).collect(),
+            moves: Vec::new(),
+            lone_base: Vec::new(),
+            lone_other: Vec::new(),
+        }
+    }
+
+    fn view_runs(&self) -> (Vec<Run>, Vec<Run>) {
+        let mut moves: Vec<Run> = self.moves.iter().map(|&(b, o)| [b, o, 1]).collect();
+        moves.sort_unstable();
+        (runs(&self.pairs, &self.lone_base, &self.lone_other), moves)
+    }
+}
+
+fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (AlignmentView, Vec<Change>, bool) {
+    let (gb, go) = (Grid::new(b), Grid::new(o));
+    let col_numbers = |g: &Grid| g.cols.iter().map(|(c, _)| *c).collect::<Vec<u32>>();
+    let row_numbers = |g: &Grid| g.rows.iter().map(|r| r.index).collect::<Vec<u32>>();
+    let (bc, oc, br, or) = (col_numbers(&gb), col_numbers(&go), row_numbers(&gb), row_numbers(&go));
+
+    let (col_al, row_al, method, fell_back) = match options.align {
+        AlignMode::Position => (Axis::identity(&bc, &oc), Axis::identity(&br, &or), "position", false),
+        AlignMode::Content => {
+            let col_al = align::align(&gb.column_items(), &go.column_items(), Options { positional_equal_gaps: true });
+            let cols = Axis::new(&col_al, &bc, &oc);
+            // Paired columns share an id in row tokens; moved columns too.
+            let mut base_ids = HashMap::new();
+            let mut other_ids = HashMap::new();
+            for (k, &(cb, co)) in cols.pairs.iter().chain(&cols.moves).enumerate() {
+                base_ids.insert(cb, k as u32);
+                other_ids.insert(co, k as u32);
+            }
+            let row_al = align::align(
+                &gb.row_items(&base_ids),
+                &go.row_items(&other_ids),
+                Options { positional_equal_gaps: false },
+            );
+            let fell_back = col_al.fell_back || row_al.fell_back;
+            (cols, Axis::new(&row_al, &br, &or), "content", fell_back)
+        }
+    };
+
+    let mut changes = Vec::new();
+    let col_letter = |c: u32| col_name(c);
+    for &c in &col_al.lone_base {
+        changes.push(axis_change(id, Kind::Column, Status::OnlyBase, Some(col_letter(c)), None, None));
+    }
+    for &c in &col_al.lone_other {
+        changes.push(axis_change(id, Kind::Column, Status::OnlyOther, None, Some(col_letter(c)), None));
+    }
+    for &(cb, co) in &col_al.moves {
+        changes.push(axis_change(id, Kind::Column, Status::Moved, Some(col_letter(cb)), Some(col_letter(co)), None));
+    }
+
+    let label = |g: &Grid, r: u32| {
+        g.sheet
+            .rows
+            .binary_search_by_key(&r, |x| x.index)
+            .ok()
+            .and_then(|i| Grid::row_label(&g.sheet.rows[i]))
+            .map(display_label)
+    };
+    for &r in &row_al.lone_base {
+        changes.push(row_change(id, Status::OnlyBase, Some(r), None, label(&gb, r)));
+    }
+    for &r in &row_al.lone_other {
+        changes.push(row_change(id, Status::OnlyOther, None, Some(r), label(&go, r)));
+    }
+    for &(rb, ro) in &row_al.moves {
+        changes.push(row_change(id, Status::Moved, Some(rb), Some(ro), label(&go, ro)));
+    }
+
+    let col_pairs: Vec<(u32, u32)> = col_al.pairs.iter().chain(&col_al.moves).copied().collect();
+    for &(rb, ro) in row_al.pairs.iter().chain(&row_al.moves) {
+        for &(cb, co) in &col_pairs {
+            let vb = gb.cell(rb, cb).map_or(&Value::Empty, |c| &c.value);
+            let vo = go.cell(ro, co).map_or(&Value::Empty, |c| &c.value);
+            if same_value(vb, vo, options.tolerance) {
+                continue;
+            }
+            let status = match (value_bytes(vb), value_bytes(vo)) {
+                (None, _) => Status::OnlyOther,
+                (_, None) => Status::OnlyBase,
+                _ => Status::Changed,
+            };
+            let delta = match (vb, vo) {
+                (Value::Number(x), Value::Number(y)) => Some(y - x),
+                (Value::Text(x), Value::Text(y)) => numeric_text(x).zip(numeric_text(y)).map(|(x, y)| y - x),
+                _ => None,
+            };
+            let (bn, on) = (cell_name(rb, cb), cell_name(ro, co));
+            let row_label = label(&go, ro).or_else(|| label(&gb, rb));
+            let base_row = label(&gb, rb).filter(|l| Some(l) != row_label.as_ref());
+            // The label cell itself needs no column label.
+            let is_label = go.cell(ro, co).is_some_and(|c| {
+                go.sheet
+                    .rows
+                    .binary_search_by_key(&ro, |r| r.index)
+                    .ok()
+                    .and_then(|i| Grid::row_label(&go.sheet.rows[i]))
+                    == text_of(c)
+                    && text_of(c).is_some()
+            });
+            let column = if is_label { None } else { go.column_label(ro, co).or_else(|| gb.column_label(rb, cb)) };
+            changes.push(Change {
+                id: format!("{id}:value:{bn}:{on}"),
+                kind: Kind::Value,
+                status,
+                base: Some(cell_location(bn, vb)),
+                other: Some(cell_location(on, vo)),
+                delta,
+                labels: Some(Labels { row: row_label, column, base_row, inferred: true }),
+            });
+        }
+    }
+    changes.sort_by_key(order_key);
+
+    let (rows, row_moves) = row_al.view_runs();
+    let (cols, col_moves) = col_al.view_runs();
+    (AlignmentView { method, fell_back, rows, row_moves, cols, col_moves }, changes, fell_back)
+}
+
+fn cell_location(cell: String, v: &Value) -> Location {
+    let kind = (!matches!(v, Value::Empty)).then(|| v.type_name());
+    Location { cell: Some(cell), row: None, column: None, kind, value: json_value(v) }
+}
+
+fn axis_change(
+    id: &str,
+    kind: Kind,
+    status: Status,
+    base: Option<String>,
+    other: Option<String>,
+    label: Option<String>,
+) -> Change {
+    let reference = |x: &Option<String>| x.clone().unwrap_or_else(|| "-".to_owned());
+    let loc =
+        |c: Option<String>| c.map(|c| Location { cell: None, row: None, column: Some(c), kind: None, value: None });
+    Change {
+        id: format!("{id}:{}:{}:{}", kind.as_str(), reference(&base), reference(&other)),
+        kind,
+        status,
+        base: loc(base),
+        other: loc(other),
+        delta: None,
+        labels: label.map(|l| Labels { row: None, column: Some(l), base_row: None, inferred: true }),
+    }
+}
+
+fn row_change(id: &str, status: Status, base: Option<u32>, other: Option<u32>, label: Option<String>) -> Change {
+    let reference = |x: Option<u32>| x.map_or_else(|| "-".to_owned(), |r| r.to_string());
+    let loc = |r: Option<u32>| r.map(|r| Location { cell: None, row: Some(r), column: None, kind: None, value: None });
+    Change {
+        id: format!("{id}:row:{}:{}", reference(base), reference(other)),
+        kind: Kind::Row,
+        status,
+        base: loc(base),
+        other: loc(other),
+        delta: None,
+        labels: label.map(|l| Labels { row: Some(l), column: None, base_row: None, inferred: true }),
+    }
+}
+
+/// Columns first, then rows and values by position on the other side (the
+/// base side for removals).
+fn order_key(c: &Change) -> (u8, u32, u32, u8) {
+    let parse = |l: &Option<Location>| -> (u32, u32) {
+        let Some(l) = l else { return (u32::MAX, u32::MAX) };
+        if let Some(cell) = &l.cell {
+            crate::cellref::parse_cell(cell).unwrap_or((u32::MAX, u32::MAX))
+        } else if let Some(r) = l.row {
+            (r, 0)
+        } else {
+            (0, l.column.as_deref().and_then(crate::cellref::parse_col).unwrap_or(0))
+        }
+    };
+    let (r, col) = if c.other.is_some() { parse(&c.other) } else { parse(&c.base) };
+    (u8::from(c.kind != Kind::Column), r, col, u8::from(c.kind == Kind::Value))
+}
+
+// ---------------------------------------------------------------------------
+// listing
+
+/// What to list from a comparison; the summary always counts everything.
+#[derive(Debug, Clone, Default)]
+pub struct Filter {
+    /// Only the sheet with this name on either side.
+    pub sheet: Option<String>,
+    /// Only these kinds; empty means all.
+    pub kinds: Vec<Kind>,
+    /// At most this many changes in total; `None` lists all.
+    pub limit: Option<usize>,
+    /// Also list sheets that are the same.
+    pub all: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Listing {
+    pub base: Side,
+    pub other: Side,
+    pub summary: Summary,
+    /// Changes listed below.
+    pub listed: usize,
+    /// Changes left out by the filter or limit, by sheet name and kind.
+    pub omitted: std::collections::BTreeMap<String, std::collections::BTreeMap<&'static str, usize>>,
+    pub sheets: Vec<SheetComparison>,
+}
+
+impl Comparison {
+    pub fn list(self, filter: &Filter) -> Listing {
+        let mut listed = 0;
+        let mut omitted: std::collections::BTreeMap<String, std::collections::BTreeMap<&'static str, usize>> =
+            std::collections::BTreeMap::new();
+        let mut sheets = Vec::new();
+        for mut sheet in self.sheets {
+            let name = sheet.other.clone().or_else(|| sheet.base.clone()).unwrap_or_default();
+            let named =
+                filter.sheet.as_ref().is_none_or(|n| Some(n) == sheet.base.as_ref() || Some(n) == sheet.other.as_ref());
+            let mut kept = Vec::new();
+            for change in std::mem::take(&mut sheet.changes) {
+                let wanted = named && (filter.kinds.is_empty() || filter.kinds.contains(&change.kind));
+                if wanted && filter.limit.is_none_or(|l| listed < l) {
+                    listed += 1;
+                    kept.push(change);
+                } else {
+                    *omitted.entry(name.clone()).or_default().entry(change.kind.as_str()).or_default() += 1;
+                }
+            }
+            sheet.changes = kept;
+            if named && (filter.all || sheet.status != Status::Same) {
+                sheets.push(sheet);
+            }
+        }
+        Listing { base: self.base, other: self.other, summary: self.summary, listed, omitted, sheets }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{label_key, numeric_text};
+
+    #[test]
+    fn labels_drop_spacing_case_and_outline_markers() {
+        for (text, key) in [
+            ("자 산 총 계", "자산총계"),
+            ("    Ⅰ. 유동자산", "유동자산"),
+            ("Ⅱ비유동자산", "비유동자산"),
+            ("(1)  당좌자산", "당좌자산"),
+            ("1. Cash", "cash"),
+            ("가. 현금", "현금"),
+            ("2025", "2025"),
+            ("2025.12.31", "2025.12.31"),
+            ("가지급금", "가지급금"),
+            ("(주)우성", "(주)우성"),
+            ("(1)", "(1)"),
+        ] {
+            assert_eq!(label_key(text).as_deref(), Some(key), "{text}");
+        }
+        assert_eq!(label_key("   "), None);
+    }
+
+    #[test]
+    fn numbers_written_as_text_parse() {
+        assert_eq!(numeric_text("19,555,301,961"), Some(19_555_301_961.0));
+        assert_eq!(numeric_text("(1,000)"), Some(-1000.0));
+        assert_eq!(numeric_text("-12.5"), Some(-12.5));
+        assert_eq!(numeric_text("50%"), Some(0.5));
+        for not in ["", "-", "1-2", "abc", "12원", "1.2.3x"] {
+            assert_eq!(numeric_text(not), None, "{not}");
+        }
+    }
+}

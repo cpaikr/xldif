@@ -69,7 +69,7 @@ fn summarize(index: usize, sheet: &Sheet) -> SheetSummary {
 pub fn inspect(file: &str, book: &Workbook) -> (Inspection, Vec<Warning>) {
     let sheets: Vec<SheetSummary> = book.sheets.iter().enumerate().map(|(i, s)| summarize(i, s)).collect();
     let mut warnings = book.warnings.clone();
-    warnings.extend(value_warnings(book, &sheets));
+    warnings.extend(stale_value_warnings(book));
     let inspection = Inspection {
         file: file.to_owned(),
         format: book.format,
@@ -81,7 +81,8 @@ pub fn inspect(file: &str, book: &Workbook) -> (Inspection, Vec<Warning>) {
     (inspection, warnings)
 }
 
-fn value_warnings(book: &Workbook, sheets: &[SheetSummary]) -> Vec<Warning> {
+/// Warnings that a workbook's stored values may not be current.
+pub fn stale_value_warnings(book: &Workbook) -> Vec<Warning> {
     let mut out = Vec::new();
     if book.calculation.mode == crate::model::CalcMode::Manual {
         out.push(Warning {
@@ -95,7 +96,12 @@ fn value_warnings(book: &Workbook, sheets: &[SheetSummary]) -> Vec<Warning> {
             message: "the workbook asks Excel to recalculate on open, so cached values may be placeholders".to_owned(),
         });
     }
-    let missing: usize = sheets.iter().map(|s| s.formulas_without_value).sum();
+    let missing = book
+        .sheets
+        .iter()
+        .flat_map(Sheet::cells)
+        .filter(|(_, c)| c.formula.is_some() && c.value == Value::Empty)
+        .count();
     if missing > 0 {
         out.push(Warning {
             code: "formula_without_value",
@@ -105,12 +111,24 @@ fn value_warnings(book: &Workbook, sheets: &[SheetSummary]) -> Vec<Warning> {
     out
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum JsonValue {
     Number(f64),
     Text(String),
     Bool(bool),
+}
+
+/// A stored value as JSON; error literals appear as text (the `type` field
+/// says which), and an empty value is absent.
+pub fn json_value(v: &Value) -> Option<JsonValue> {
+    match v {
+        Value::Empty => None,
+        Value::Number(n) => Some(JsonValue::Number(*n)),
+        Value::Text(t) => Some(JsonValue::Text(t.to_string())),
+        Value::Error(t) => Some(JsonValue::Text(t.clone())),
+        Value::Bool(b) => Some(JsonValue::Bool(*b)),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -167,13 +185,7 @@ pub fn cells(sheet: &Sheet, range: Option<Range>, limit: Option<usize>) -> Cells
             omitted += 1;
             continue;
         }
-        let value = match &cell.value {
-            Value::Empty => None,
-            Value::Number(n) => Some(JsonValue::Number(*n)),
-            Value::Text(t) => Some(JsonValue::Text(t.to_string())),
-            Value::Error(t) => Some(JsonValue::Text(t.clone())),
-            Value::Bool(b) => Some(JsonValue::Bool(*b)),
-        };
+        let value = json_value(&cell.value);
         let formula = cell.formula.as_ref();
         out.push(CellView {
             cell: cell_name(row, cell.col),

@@ -223,3 +223,58 @@ fn missing_arguments_hint_at_the_command_help() {
     assert_eq!(env["command"], "cells");
     assert!(env["error"]["hint"].as_str().unwrap().contains("xldif cells --help"));
 }
+
+// ---------------------------------------------------------------------------
+// compare
+
+#[test]
+fn compare_reports_aligned_changes() {
+    let work = Work::new();
+    let base = work.file(
+        "v1.xlsx",
+        &xldif_fixtures::grid_book(&[("BS", &[&["Account", "2025"], &["Cash", "100"], &["Total", "100"]])]),
+    );
+    let other = work.file(
+        "v2.xlsx",
+        &xldif_fixtures::grid_book(&[(
+            "BS",
+            &[&["Account", "2025"], &["Cash", "100"], &["Prepaid", "5"], &["Total", "105"]],
+        )]),
+    );
+    let env = ok(&xldif(["compare", s(&base), s(&other)]), "compare");
+    let r = &env["result"];
+    assert_eq!(
+        (r["base"]["file"].clone(), r["other"]["file"].clone()),
+        (Value::from("v1.xlsx"), Value::from("v2.xlsx"))
+    );
+    assert_eq!(r["summary"]["rowsOnlyOther"], 1);
+    assert_eq!(r["summary"]["value"], 1);
+    let changes = r["sheets"][0]["changes"].as_array().unwrap();
+    assert_eq!(changes[0]["id"], "s0:row:-:3");
+    assert_eq!(changes[1]["id"], "s0:value:B3:B4");
+    assert_eq!(changes[1]["delta"], 5.0);
+    assert_eq!(changes[1]["labels"]["row"], "Total");
+    assert_eq!(r["listed"], 2);
+
+    let text = xldif(["compare", s(&base), s(&other), "--format", "text", "--kind", "value"]);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("value\tChanged\tB3→B4\t100 → 105 (+5)\tTotal | 2025"), "{}", text.stdout);
+    assert!(text.stdout.contains("1 more change(s) left out"), "{}", text.stdout);
+
+    let same = ok(&xldif(["compare", s(&base), s(&base)]), "compare");
+    assert_eq!(same["result"]["sheets"].as_array().unwrap().len(), 0);
+    assert_eq!(
+        ok(&xldif(["compare", s(&base), s(&base), "--all"]), "compare")["result"]["sheets"][0]["status"],
+        "same"
+    );
+}
+
+#[test]
+fn compare_rejects_bad_options() {
+    let work = Work::new();
+    let book = work.basic();
+    failure(&xldif(["compare", s(&book), s(&book), "--sheet", "Nope"]), "invalid_argument");
+    failure(&xldif(["compare", s(&book), s(&book), "--tolerance=-1"]), "invalid_argument");
+    let run = xldif(["compare", s(&book), s(&book), "--kind", "colour"]);
+    assert_eq!(run.code, 2);
+}

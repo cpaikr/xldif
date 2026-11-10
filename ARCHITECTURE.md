@@ -23,10 +23,14 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   - [model.rs](crates/xldif/src/model.rs): the immutable workbook model;
   - [cellref.rs](crates/xldif/src/cellref.rs): A1 references and ranges;
   - [views.rs](crates/xldif/src/views.rs): `inspect` and `cells` results;
+  - [align.rs](crates/xldif/src/align.rs): sequence alignment of rows or
+    columns (key anchors, similarity in the gaps, moves);
+  - [diff.rs](crates/xldif/src/diff.rs): sheet pairing, column-then-row
+    alignment, value changes, labels, and the `compare` listing;
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
-  Alignment, diff, and the renderers arrive with M1–M4 (see PLAN.md ›
-  Architecture).
+  Formula comparison, formatting, objects, and the HTML report arrive with
+  M2–M4 (see PLAN.md › Architecture).
 - [`crates/xldif-cli`](crates/xldif-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document
   ([envelope.rs](crates/xldif-cli/src/envelope.rs)).
@@ -42,7 +46,11 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   count are capped ([package.rs](crates/xldif/src/package.rs),
   [xml.rs](crates/xldif/src/xml.rs), [reader.rs](crates/xldif/src/reader.rs)).
   Hostile input fails with `invalid_archive` instead of exhausting memory or
-  the stack. Alignment work will be capped the same way.
+  the stack. Alignment work is capped per gap; a gap beyond the cap pairs by
+  position with an `alignment_fallback` warning.
+- **Deterministic results.** Content hashes are fixed (FNV-1a) and every
+  alignment tie breaks by index, so the same inputs always give the same
+  changes and ids. Change ids derive from locations, never from list order.
 - **Stored values only.** The reader takes each cell's cached result as
   written; nothing is recalculated. `inspect` warns when values may be stale
   (manual calculation, recalculate-on-open, formulas without a result).
@@ -75,6 +83,12 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`scripts/parity.py`](scripts/parity.py) compares every cell's value and
   formula with openpyxl, an independent reader, and counts the known,
   intended differences it skips.
+- [`crates/xldif/tests/compare.rs`](crates/xldif/tests/compare.rs) covers each
+  alignment case: inserted, deleted, and moved rows; an inserted column with
+  inserted rows; spacer rows; renumbered labels; renamed and moved sheets;
+  swap symmetry.
 - [`scripts/check.py`](scripts/check.py) runs fmt, clippy, tests, a CLI smoke
-  run, and parity over the public fixtures and, when present, the private
-  corpus (counts only).
+  run, parity over the public fixtures and, when present, the private corpus,
+  and a corpus compare smoke run: every workbook against itself must show no
+  changes, and consecutive versions must compare, counting pairs that do not
+  mirror when swapped (counts only).

@@ -11,9 +11,11 @@ algorithm is new.
 
 Status:
 - M0 (scaffold) is done.
-- M1 is in progress. Done: `package`, the values and formula-text reader,
-  `inspect`, `cells`, and openpyxl parity (clean on 29 private workbooks).
-- Next action: the values-only alignment spike and `compare`.
+- M1 is done: the reader (`inspect`, `cells`, openpyxl parity clean on 29
+  private workbooks) and values-only `compare` with content alignment
+  (self-compare and swap symmetry clean on the corpus).
+- Next action: M2, the formula tokenizer and comparing formulas through
+  the alignment.
 
 ## Decisions
 
@@ -126,6 +128,11 @@ Commands:
 
 ### JSON result shape (sketch)
 
+M1 implements this for `value`, `row`, `column`, and sheet changes. As
+built, `listed` and `omitted` sit beside `summary`, the base side's row
+label is `labels.baseRow`, and alignment runs list paired rows only (one-sided
+rows are `row` changes). `xldif compare --help` describes the output.
+
 There is one `kind` vocabulary, shared by `--kind` and the output: `value`,
 `formula`, `format`, `row`, `column`, `sheet`, `name`, `comment`, `merge`,
 `validation`, `conditionalFormat`, `hyperlink`, `theme`.
@@ -176,13 +183,13 @@ There is one `kind` vocabulary, shared by `--kind` and the output: `value`,
   - `labels.row` is the first text cell to the left in the same row.
   - `labels.column` is the nearest text cell above in the same column.
   - Both are searched within a small window and taken from the other side,
-    with `labels.base` added when the base side's label differs.
+    with `labels.baseRow` added when the base side's label differs.
   - `inferred: true` marks the labels as heuristic.
 - **Folding:** a rectangular block of cells that share the same property
   change becomes a single change with a range. This applies to formats and
   to formulas adjusted by structure, so restyling a 50k-cell table is one
   entry.
-- **Limits:** `--limit` caps the listed changes. `summary.omitted` counts
+- **Limits:** `--limit` caps the listed changes. `omitted` counts
   what was cut for each sheet and kind, so an agent knows where to narrow
   with `--sheet` and `--kind`.
 
@@ -190,55 +197,55 @@ There is one `kind` vocabulary, shared by `--kind` and the output: `value`,
 
 The tool exists to handle inserted rows and columns, so whatever an
 alignment signal is built from must survive a row or column insertion.
+Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
 
 1. **Sheet pairing.** Pair sheets by exact name first. Pair the remaining
-   sheets by content similarity above a threshold and report them as
-   renamed. Report order and visibility changes separately.
-2. **Columns:**
-   - Keep columns in position when both sides have the same used width and
-     their header rows match closely.
-   - Otherwise, key each column by its header text: the text cells in the
-     first rows that look like headers.
-   - Then match by similarity: the Jaccard similarity of the multiset of the
-     column's values, sampled over rows whose label key appears on both
-     sides.
-   - Use difflib-style matching, and never let pairs cross.
-3. **Rows:**
-   - Key each row by its label: the leading text cells, normalized for
-     whitespace and case. This is dsdai's account-label approach, and it
-     survives an inserted column.
-   - Match the keys with the difflib matcher and no crossing pairs.
-   - In the gaps, pair rows whose value similarity is at least a threshold,
-     measured over the matched columns (Jaccard on multisets of value and
-     formula-shape tokens).
-   - Blank and formatting-only rows are left out of matching and then fill
-     the gaps between their matched neighbours in position, so runs of
-     spacer rows never anchor unrelated sections.
-4. **Cost.** When several alignments are possible (column-first against
-   row-first, or a pairing against delete plus insert), xldif picks the one
-   with the lowest cost.
-   - The cost adds a weight for each row or column inserted or deleted and a
-     weight for each changed cell within matched pairs.
-   - An inserted row costs less than a matched row in which most cells
-     changed.
-   - The weights are constants tuned on the private corpus and recorded in
-     `ARCHITECTURE.md`.
-5. **Moves.** After alignment, an unmatched base row and an unmatched other
-   row with the same unique key and matching value shape are reported as
-   moved (in `rowMoves`), not as delete plus insert. Columns are handled the
-   same way.
-6. **Determinism and symmetry.** Every tie-break orders candidate pairs
-   canonically (by the pair of indices, base then other), never by search
-   order. Comparing a file with itself yields no changes. On fixtures with
-   an unambiguous alignment, swapping base and other gives the inverse
-   alignment and the same change counts.
-7. **Bounds.** The matching work is capped. When the cap is exceeded, xldif
-   falls back to position-based matching for that sheet, with a warning and
-   `alignment.method: "position"`.
-8. **Objects follow the alignment.** Merges, comments, data validation,
-   conditional formatting ranges, and hyperlinks are mapped through the row
-   and column maps before they are compared, so an inserted row doesn't flag
-   every comment below it.
+   sheets by content similarity (at least 0.5) and report them as renamed.
+   A paired sheet outside the longest in-order run is reported as moved.
+   Visibility changes come with the other workbook objects in M3.
+2. **Items.** Each sheet's content rows and columns become items with a
+   label key and a multiset of content tokens:
+   - A row's key is its leftmost text cell; a column's key is the header
+     text (or a year stored as a number) in the sheet's top ten content rows.
+   - Keys drop whitespace (Korean statements space out characters), case,
+     and one leading outline marker ("Ⅰ.", "(1)", "1.", "가."), so a
+     renumbered section still matches.
+   - Column tokens are the column's values. Row tokens tie each value to its
+     aligned column, so a value counts as shared only in the matching column.
+   - Blank and formatting-only rows are not items, so spacer rows never
+     anchor anything and inserting one is not a change.
+3. **Order: columns, then rows.** Column alignment uses values only, which
+   an inserted row barely changes; row alignment then uses the column map,
+   so an inserted column cannot break row matching.
+4. **Matching each axis:**
+   - Trim equal keys at both ends.
+   - Patience: keys unique on both sides anchor the region, keeping their
+     longest in-order run, so one moved row cannot pull its neighbours out
+     of line.
+   - Where no key is unique, anchor on the rarest shared key (at most 64
+     occurrences) with its longest run, and recurse.
+   - In the gaps between anchors, pair items by similarity (bigram label
+     likeness averaged with token Jaccard) with a weighted LCS, at least
+     0.5, never crossing.
+   - A leftover equal-sized run pairs by position for columns (headers often
+     change wholesale between periods) and for rows when every row keeps
+     its layout (a row whose label alone was edited is one value change).
+   - The planned explicit cost model was not needed: these thresholds and
+     the layout rule gave clean results on the corpus. Revisit only if a
+     real file shows a bad choice.
+5. **Moves.** Unpaired items with the same key and the same tokens, unique
+   on each side, are moves (`rowMoves`, `colMoves`).
+6. **Determinism and symmetry.** Hashes are fixed (FNV-1a) and every tie
+   breaks by index, never by hash order. On the private corpus all 29
+   workbooks compare clean against themselves and all 24 consecutive version
+   pairs mirror exactly when swapped (`scripts/check.py`).
+7. **Bounds.** A gap larger than 4 million item pairs is paired by position
+   instead, with an `alignment_fallback` warning and `fellBack: true`.
+   `--align position` compares A1 with A1 throughout.
+8. **Objects follow the alignment (M3).** Merges, comments, data
+   validation, conditional formatting ranges, and hyperlinks are mapped
+   through the row and column maps before they are compared, so an inserted
+   row doesn't flag every comment below it.
 
 ## Cell and object comparison
 
@@ -315,7 +322,7 @@ alignment signal is built from must survive a row or column insertion.
 
 `skills/xldif/SKILL.md`, structured like dsdai's `dart-dsd`:
 - `SKILL.md` covers when to use the tool, `inspect` first, filtering by
-  `--sheet` and `--kind` using `summary.omitted`, reading the envelope, and
+  `--sheet` and `--kind` using `omitted`, reading the envelope, and
   handing people the HTML.
 - A reference file explains the change kinds and how alignment can mislead:
   position fallback, inferred labels, `adjusted` formulas, and stale cached

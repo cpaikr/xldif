@@ -5,10 +5,11 @@ use std::path::Path;
 
 use serde_json::Value;
 use xldif::cellref::Range;
+use xldif::diff::{self, AlignMode, Change, CompareOptions, Filter, Listing, Location};
 use xldif::views::{self, Cells, Inspection, JsonValue};
 use xldif::{Error, ErrorCode};
 
-use crate::cli::{Command, Format};
+use crate::cli::{Align, Command, Format, Kind};
 use crate::envelope::{Failure, Warning};
 
 pub enum Output {
@@ -33,6 +34,49 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             Ok(match format {
                 Format::Json => Output::Json { result: json(&inspection), warnings },
                 Format::Text => Output::Text(inspect_text(&inspection, &warnings)),
+            })
+        }
+        Command::Compare { base, other, sheet, kind, limit, all, tolerance, align, format } => {
+            if !(tolerance >= 0.0 && tolerance.is_finite()) {
+                return Err(
+                    Error::new(ErrorCode::InvalidArgument, "--tolerance must be a finite number of 0 or more").into()
+                );
+            }
+            let (b, o) = (xldif::read_path(&base)?, xldif::read_path(&other)?);
+            let options = CompareOptions {
+                tolerance,
+                align: match align {
+                    Align::Content => AlignMode::Content,
+                    Align::Position => AlignMode::Position,
+                },
+            };
+            if let Some(name) = &sheet
+                && b.sheet(name).is_none()
+                && o.sheet(name).is_none()
+            {
+                let names: std::collections::BTreeSet<&str> =
+                    b.sheets.iter().chain(&o.sheets).map(|s| s.name.as_str()).collect();
+                return Err(Error::new(
+                    ErrorCode::InvalidArgument,
+                    format!("neither workbook has a sheet named {name:?}"),
+                )
+                .with_hint(format!("sheets: {}", views::quoted_names(names.into_iter())))
+                .into());
+            }
+            let comparison = diff::compare(&file_label(&base), &b, &file_label(&other), &o, options);
+            let warnings: Vec<Warning> = comparison.warnings.iter().cloned().map(Warning::from).collect();
+            let kinds = kind
+                .into_iter()
+                .map(|k| match k {
+                    Kind::Value => diff::Kind::Value,
+                    Kind::Row => diff::Kind::Row,
+                    Kind::Column => diff::Kind::Column,
+                })
+                .collect();
+            let listing = comparison.list(&Filter { sheet, kinds, limit: (limit > 0).then_some(limit), all });
+            Ok(match format {
+                Format::Json => Output::Json { result: json(&listing), warnings },
+                Format::Text => Output::Text(compare_text(&listing, &warnings)),
             })
         }
         Command::Cells { book, sheet, range, limit, format } => {
@@ -135,6 +179,82 @@ fn cells_text(c: &Cells, warnings: &[Warning]) -> String {
     }
     if c.omitted > 0 {
         let _ = writeln!(out, "... {} more cells (raise --limit, or 0 for all)", c.omitted);
+    }
+    write_warnings(&mut out, warnings);
+    out
+}
+
+fn value_text(v: Option<&JsonValue>) -> String {
+    match v {
+        None => "(empty)".to_owned(),
+        Some(JsonValue::Number(n)) => n.to_string(),
+        // Debug quoting also escapes control characters.
+        Some(JsonValue::Text(t)) => format!("{t:?}"),
+        Some(JsonValue::Bool(b)) => b.to_string(),
+    }
+}
+
+fn reference(l: Option<&Location>) -> String {
+    l.and_then(|l| l.cell.clone().or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone()))
+        .unwrap_or_else(|| "-".to_owned())
+}
+
+fn change_text(c: &Change) -> String {
+    let mut line =
+        format!("{}\t{:?}\t{}→{}", c.kind.as_str(), c.status, reference(c.base.as_ref()), reference(c.other.as_ref()));
+    if c.kind == diff::Kind::Value {
+        let _ = write!(
+            line,
+            "\t{} → {}",
+            value_text(c.base.as_ref().and_then(|l| l.value.as_ref())),
+            value_text(c.other.as_ref().and_then(|l| l.value.as_ref()))
+        );
+        if let Some(d) = c.delta {
+            let _ = write!(line, " ({d:+})");
+        }
+    }
+    if let Some(l) = &c.labels {
+        let parts: Vec<&str> = [l.row.as_deref(), l.column.as_deref()].into_iter().flatten().collect();
+        if !parts.is_empty() {
+            let _ = write!(line, "\t{}", escape(&parts.join(" | ")));
+        }
+    }
+    line
+}
+
+fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
+    let mut out = String::new();
+    let s = &l.summary;
+    let _ = writeln!(
+        out,
+        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other; rows +{} -{} moved {}; columns +{} -{}; {} value change(s)",
+        escape(&l.base.file),
+        escape(&l.other.file),
+        s.sheets_changed,
+        s.sheets_only_base,
+        s.sheets_only_other,
+        s.rows_only_other,
+        s.rows_only_base,
+        s.rows_moved,
+        s.columns_only_other,
+        s.columns_only_base,
+        s.value
+    );
+    for sheet in &l.sheets {
+        let name = match (&sheet.base, &sheet.other) {
+            (Some(b), Some(o)) if b != o => format!("{} → {}", escape(b), escape(o)),
+            (Some(n), _) | (None, Some(n)) => escape(n),
+            (None, None) => String::new(),
+        };
+        let moved = if sheet.moved { ", moved" } else { "" };
+        let _ = writeln!(out, "\n[{name}] {:?}{moved}", sheet.status);
+        for c in &sheet.changes {
+            let _ = writeln!(out, "{}", change_text(c));
+        }
+    }
+    let omitted: usize = l.omitted.values().flat_map(|k| k.values()).sum();
+    if omitted > 0 {
+        let _ = writeln!(out, "\n... {omitted} more change(s) left out (narrow with --sheet/--kind, or --limit 0)");
     }
     write_warnings(&mut out, warnings);
     out
