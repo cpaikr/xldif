@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use crate::cellref::{MAX_COL, MAX_ROW, parse_cell};
 use crate::model::{
-    BookFormat, CalcMode, Calculation, Cell, DefinedName, Formula, FormulaKind, Row, Sheet, SheetKind, Value,
-    Visibility, Warning, Workbook,
+    BookFormat, CalcMode, Calculation, Cell, DefinedName, Formula, FormulaKind, LineProps, Row, Sheet, SheetKind,
+    Value, Visibility, Warning, Workbook,
 };
 use crate::package::{Limits, Package, Relationship};
 use crate::xml::{Event, Parser, decode_xstring};
@@ -479,9 +479,8 @@ fn parse_sheet(
     }
     finish(row.take(), &mut sheet.rows);
     normalize(&mut sheet.rows);
-    // Layout lookups binary-search by first line.
-    sheet.layout.rows.sort_by_key(|l| l.index);
-    sheet.layout.cols.sort_by_key(|l| l.index);
+    sheet.layout.rows = disjoint_lines(std::mem::take(&mut sheet.layout.rows));
+    sheet.layout.cols = disjoint_lines(std::mem::take(&mut sheet.layout.cols));
     expand_shared_formulas(&mut sheet.rows, budget)?;
     if bad_values > 0 {
         warnings.push(Warning {
@@ -550,12 +549,79 @@ fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared:
     }
 }
 
+/// A shared formula's anchor: where it is written and its tokens.
+struct Anchor {
+    row: u32,
+    col: u32,
+    tokens: Vec<crate::formula::Token>,
+    /// The anchor's rendered length and its reference count, which bound
+    /// every follower's length.
+    len: u64,
+    refs: u64,
+}
+
+impl Anchor {
+    /// The most a reference's text grows when shifted: each point at most
+    /// from `A1` to `$XFD$1048576` (2 to 12 bytes), or the whole reference
+    /// to `#REF!`, which is shorter than two points.
+    const REF_GROWTH: u64 = 2 * 10 + 1;
+
+    fn new(row: u32, col: u32, text: &str) -> Self {
+        let tokens = crate::formula::tokenize(text);
+        let len = crate::formula::render(&tokens).len() as u64;
+        let refs = tokens.iter().filter(|t| matches!(t, crate::formula::Token::Ref(_))).count() as u64;
+        Anchor { row, col, tokens, len, refs }
+    }
+
+    /// An upper bound on a follower's text length, and so on what its
+    /// shifted tokens hold.
+    fn max_len(&self) -> u64 {
+        self.len + self.refs * Self::REF_GROWTH
+    }
+}
+
+/// Row or column records made sorted and disjoint, so a lookup is one
+/// binary search and listing their lines costs at most the grid's extent.
+/// Excel writes no overlapping records; where a file does, the record
+/// written first keeps the lines it covers and later ones take what is
+/// left (a choice, unverified against Excel).
+fn disjoint_lines(records: Vec<LineProps>) -> Vec<LineProps> {
+    // Covered spans, merged regardless of their records: start to end.
+    let mut covered: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    let mut out = Vec::with_capacity(records.len());
+    for rec in records {
+        let (a, b) = (rec.index, rec.last);
+        let mut overlap: Vec<(u32, u32)> =
+            covered.range(..a).next_back().filter(|(_, e)| **e >= a).map(|(s, e)| (*s, *e)).into_iter().collect();
+        overlap.extend(covered.range(a..=b).map(|(s, e)| (*s, *e)));
+        let mut cursor = a;
+        for &(s, e) in &overlap {
+            if s > cursor {
+                out.push(LineProps { index: cursor, last: s - 1, ..rec.clone() });
+            }
+            cursor = cursor.max(e.saturating_add(1));
+        }
+        if cursor <= b {
+            out.push(LineProps { index: cursor, last: b, ..rec.clone() });
+        }
+        // Every span visited merges into one, so the work is amortized.
+        for (s, _) in &overlap {
+            covered.remove(s);
+        }
+        let start = overlap.first().map_or(a, |o| o.0.min(a));
+        let end = overlap.last().map_or(b, |o| o.1.max(b));
+        covered.insert(start, end);
+    }
+    out.sort_by_key(|l| l.index);
+    out
+}
+
 /// Gives every cell of a shared formula its own text. Excel stores the text
 /// once, on the anchor cell (the one with `ref`), and the other cells name
 /// it by `si`; each reads as the anchor's formula shifted by its offset.
 /// A follower whose anchor is missing keeps its empty text.
 fn expand_shared_formulas(rows: &mut [Row], budget: &mut Budget) -> Result<(), Error> {
-    let mut anchors: HashMap<u32, (u32, u32, Vec<crate::formula::Token>)> = HashMap::new();
+    let mut anchors: HashMap<u32, Anchor> = HashMap::new();
     for row in rows.iter() {
         for cell in &row.cells {
             if let Some(f) = &cell.formula
@@ -563,7 +629,7 @@ fn expand_shared_formulas(rows: &mut [Row], budget: &mut Budget) -> Result<(), E
                 && !f.text.is_empty()
                 && let Some(si) = f.shared_index
             {
-                anchors.entry(si).or_insert_with(|| (row.index, cell.col, crate::formula::tokenize(&f.text)));
+                anchors.entry(si).or_insert_with(|| Anchor::new(row.index, cell.col, &f.text));
             }
         }
     }
@@ -576,20 +642,24 @@ fn expand_shared_formulas(rows: &mut [Row], budget: &mut Budget) -> Result<(), E
             if f.kind != FormulaKind::Shared || !f.text.is_empty() {
                 continue;
             }
-            if let Some((r, c, tokens)) = f.shared_index.and_then(|si| anchors.get(&si)) {
+            if let Some(a) = f.shared_index.and_then(|si| anchors.get(&si)) {
+                // Charge the most this follower can take before allocating
+                // its tokens and text, then give back what it did not use.
+                let bound = a.max_len();
+                budget.formula_bytes_left = budget.formula_bytes_left.checked_sub(bound).ok_or_else(|| {
+                    Error::new(
+                        ErrorCode::InvalidArchive,
+                        "the workbook's shared formulas expand to more formula text than xldif reads",
+                    )
+                })?;
                 let shifted = crate::formula::shift(
-                    tokens,
-                    i64::from(row.index) - i64::from(*r),
-                    i64::from(cell.col) - i64::from(*c),
+                    &a.tokens,
+                    i64::from(row.index) - i64::from(a.row),
+                    i64::from(cell.col) - i64::from(a.col),
                 );
                 f.text = crate::formula::render(&shifted);
-                budget.formula_bytes_left =
-                    budget.formula_bytes_left.checked_sub(f.text.len() as u64).ok_or_else(|| {
-                        Error::new(
-                            ErrorCode::InvalidArchive,
-                            "the workbook's shared formulas expand to more formula text than xldif reads",
-                        )
-                    })?;
+                debug_assert!(f.text.len() as u64 <= bound, "a shifted formula outgrew its bound");
+                budget.formula_bytes_left += bound.saturating_sub(f.text.len() as u64);
             }
         }
     }
@@ -614,5 +684,49 @@ fn normalize(rows: &mut Vec<Row>) {
         row.cells.reverse();
         row.cells.dedup_by_key(|c| c.col);
         row.cells.reverse();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(index: u32, last: u32, style: u32) -> LineProps {
+        LineProps { index, last, size: None, hidden: false, style: Some(style) }
+    }
+
+    fn spans(lines: &[LineProps]) -> Vec<(u32, u32, u32)> {
+        lines.iter().map(|l| (l.index, l.last, l.style.unwrap())).collect()
+    }
+
+    #[test]
+    fn the_first_overlapping_record_keeps_its_lines() {
+        let got = disjoint_lines(vec![line(1, 10, 1), line(2, 2, 2), line(3, 3, 3)]);
+        assert_eq!(spans(&got), [(1, 10, 1)]);
+        let got = disjoint_lines(vec![line(5, 5, 1), line(8, 9, 2), line(1, 10, 3)]);
+        assert_eq!(spans(&got), [(1, 4, 3), (5, 5, 1), (6, 7, 3), (8, 9, 2), (10, 10, 3)]);
+    }
+
+    #[test]
+    fn touching_and_unordered_records_stay_apart() {
+        let got = disjoint_lines(vec![line(4, 6, 1), line(1, 3, 2), line(7, 7, 3), line(2, 5, 4)]);
+        assert_eq!(spans(&got), [(1, 3, 2), (4, 6, 1), (7, 7, 3)]);
+    }
+
+    #[test]
+    fn repeated_full_width_records_collapse() {
+        let records = (0..10_000).map(|i| line(1, MAX_COL, i)).collect();
+        assert_eq!(spans(&disjoint_lines(records)), [(1, MAX_COL, 0)]);
+    }
+
+    #[test]
+    fn a_follower_never_outgrows_its_anchors_bound() {
+        for text in ["A1", "B1:C2+$D$3", "Sheet2!1:1+A:A+SUM(A1,'My sheet'!B2:C3)", "A1048576+XFD1"] {
+            let a = Anchor::new(1, 1, text);
+            for (rows, cols) in [(0, 0), (1, 1), (1_048_575, 16_383), (2_000_000, 0), (0, 20_000)] {
+                let len = crate::formula::render(&crate::formula::shift(&a.tokens, rows, cols)).len() as u64;
+                assert!(len <= a.max_len(), "{text} shifted by ({rows}, {cols}): {len} > {}", a.max_len());
+            }
+        }
     }
 }

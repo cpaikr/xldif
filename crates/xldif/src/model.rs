@@ -138,7 +138,8 @@ pub struct Sheet {
 }
 
 /// Row and column records that change how a sheet looks: hidden, a height
-/// or width set by hand, or a style for the whole row or column.
+/// or width set by hand, or a style for the whole row or column. Both lists
+/// are sorted by `index` and never overlap (the reader makes them so).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
     pub rows: Vec<LineProps>,

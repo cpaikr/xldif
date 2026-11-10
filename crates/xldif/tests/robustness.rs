@@ -147,3 +147,47 @@ fn column_records_outside_the_grid_are_ignored() {
     let c = xldif::diff::compare("a", &book, "b", &book, xldif::diff::CompareOptions::default());
     assert!(c.sheets[0].changes.is_empty());
 }
+
+#[test]
+fn overlapping_column_records_keep_the_first() {
+    let sheet = |cols: &str| {
+        let part = format!(
+            r#"<worksheet xmlns="{}"><cols>{cols}</cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+            xldif_fixtures::raw::MAIN_NS
+        );
+        read_bytes(RawBook::new().sheet_part("S", &part).build()).unwrap()
+    };
+    let wide = r#"<col min="1" max="10" width="5" customWidth="1"/>"#;
+    let base = sheet(wide);
+    let other =
+        sheet(&format!(r#"{wide}<col min="2" max="2" width="9" customWidth="1"/><col min="3" max="3" hidden="1"/>"#));
+    assert_eq!(other.sheets[0].layout.cols.len(), 1);
+    let c = xldif::diff::compare("a", &base, "b", &other, xldif::diff::CompareOptions::default());
+    assert!(c.sheets[0].changes.is_empty());
+}
+
+#[test]
+fn repeated_full_width_column_records_are_read_once() {
+    let cols: String = (0..20_000).map(|_| r#"<col min="1" max="16384" hidden="1"/>"#).collect();
+    let part = format!(
+        r#"<worksheet xmlns="{}"><cols>{cols}</cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+        xldif_fixtures::raw::MAIN_NS
+    );
+    let book = read_bytes(RawBook::new().sheet_part("S", &part).build()).unwrap();
+    assert_eq!(book.sheets[0].layout.cols.len(), 1);
+    let c = xldif::diff::compare("a", &book, "b", &book, xldif::diff::CompareOptions::default());
+    assert!(c.sheets[0].changes.is_empty());
+}
+
+#[test]
+fn a_single_follower_over_the_formula_bound_fails() {
+    // One follower alone needs more than the bound allows.
+    let long = "1".repeat(300);
+    let rows = format!(
+        r#"<row r="1"><c r="A1"><f t="shared" ref="A1:A2" si="0">{long}+B1</f><v>1</v></c></row><row r="2"><c r="A2"><f t="shared" si="0"/><v>1</v></c></row>"#
+    );
+    let book = RawBook::new().sheet("S", &rows).build();
+    let tight = Limits { max_formula_bytes: 300, ..Limits::default() };
+    assert_eq!(code(read_bytes_with(book.clone(), &tight)), ErrorCode::InvalidArchive);
+    assert!(read_bytes_with(book, &Limits { max_formula_bytes: 400, ..Limits::default() }).is_ok());
+}
