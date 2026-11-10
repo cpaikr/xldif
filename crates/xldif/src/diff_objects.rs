@@ -357,13 +357,29 @@ fn ranges_name(ranges: &[Range]) -> String {
 /// A rule with its (mapped, sorted) ranges, as matched.
 type Placed<'a> = (Vec<Range>, &'a RangeRule);
 /// How rules are keyed in one matching pass.
-type RuleKey<'k> = &'k dyn Fn(&Placed<'_>) -> String;
+type RuleKey<'k> = &'k dyn Fn(&Placed<'_>, Option<&SheetMap>) -> String;
 
 /// Rules over ranges (validation, conditional formatting, hyperlinks),
 /// matched in three passes: the same (mapped) ranges and rule is no change;
 /// then the same ranges with a different rule is a rule change; then the
 /// same rule on different ranges is a ranges change. What is left is
 /// one-sided.
+/// A rule as compared: its description and its formulas, normalized (and,
+/// for the base side, carried through the alignment).
+fn rule_text(rule: &RangeRule, map: Option<&SheetMap>) -> String {
+    let mut text = rule.rule.clone();
+    for f in &rule.formulas {
+        let tokens = crate::formula::tokenize(f);
+        let tokens = match map {
+            Some(m) => crate::formula::remap(&tokens, m, |_| None),
+            None => tokens,
+        };
+        text.push_str("; formula=");
+        text.push_str(&crate::formula::render(&tokens).to_uppercase());
+    }
+    text
+}
+
 fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], fwd: &SheetMap) -> Vec<Change> {
     let sorted = |ranges: &[Range]| {
         let mut m = ranges.to_vec();
@@ -383,16 +399,16 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
     let index = |key: RuleKey<'_>| {
         let mut map: HashMap<String, std::collections::VecDeque<usize>> = HashMap::new();
         for (j, r) in right.iter().enumerate() {
-            map.entry(key(r)).or_default().push_back(j);
+            map.entry(key(r, None)).or_default().push_back(j);
         }
         map
     };
-    let both = |r: &Placed<'_>| format!("{}|{}", ranges_name(&r.0), r.1.rule);
-    let by_ranges = |r: &Placed<'_>| ranges_name(&r.0);
-    let by_rule = |r: &Placed<'_>| r.1.rule.clone();
-    let loc = |ranges: &[Range], rule: &str| Location {
+    let both = |r: &Placed<'_>, map: Option<&SheetMap>| format!("{}|{}", ranges_name(&r.0), rule_text(r.1, map));
+    let by_ranges = |r: &Placed<'_>, _: Option<&SheetMap>| ranges_name(&r.0);
+    let by_rule = |r: &Placed<'_>, map: Option<&SheetMap>| rule_text(r.1, map);
+    let loc = |ranges: &[Range], rule: &RangeRule| Location {
         range: Some(ranges_name(ranges)),
-        text: Some(rule.to_owned()),
+        text: Some(rule_text(rule, None)),
         ..Location::default()
     };
     let mut out = Vec::new();
@@ -402,7 +418,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
             if left_done[i] {
                 continue;
             }
-            let Some(queue) = available.get_mut(&key(l)) else { continue };
+            let Some(queue) = available.get_mut(&key(l, Some(fwd))) else { continue };
             let Some(j) = std::iter::from_fn(|| queue.pop_front()).find(|&j| !right_done[j]) else { continue };
             left_done[i] = true;
             right_done[j] = true;
@@ -411,7 +427,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
             }
             let (n, s) = &right[j];
             let (name, before, after) = if pass == 1 {
-                ("rule", l.1.rule.clone(), s.rule.clone())
+                ("rule", rule_text(l.1, None), rule_text(s, None))
             } else {
                 ("ranges", ranges_name(&l.0), ranges_name(n))
             };
@@ -419,8 +435,8 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
                 format!("{id}:{}:{}:{}", kind.as_str(), ranges_name(&l.1.ranges), ranges_name(n)),
                 kind,
                 Status::Changed,
-                Some(loc(&l.1.ranges, &l.1.rule)),
-                Some(loc(n, &s.rule)),
+                Some(loc(&l.1.ranges, l.1)),
+                Some(loc(n, s)),
             );
             c.properties = vec![prop(name, before, after)];
             out.push(c);
@@ -431,7 +447,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
             format!("{id}:{}:{}:-", kind.as_str(), ranges_name(&r.ranges)),
             kind,
             Status::OnlyBase,
-            Some(loc(&r.ranges, &r.rule)),
+            Some(loc(&r.ranges, r)),
             None,
         ));
     }
@@ -441,7 +457,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
             kind,
             Status::OnlyOther,
             None,
-            Some(loc(n, &s.rule)),
+            Some(loc(n, s)),
         ));
     }
     out
@@ -449,7 +465,10 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
 
 fn hyperlink_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> {
     let to_rules = |links: &[crate::model::Hyperlink]| -> Vec<RangeRule> {
-        links.iter().map(|h| RangeRule { ranges: vec![h.range].into(), rule: h.target.clone() }).collect()
+        links
+            .iter()
+            .map(|h| RangeRule { ranges: vec![h.range].into(), rule: h.target.clone(), formulas: Vec::new() })
+            .collect()
     };
     rule_changes(id, Kind::Hyperlink, &to_rules(&b.sheet.hyperlinks), &to_rules(&o.sheet.hyperlinks), fwd)
 }

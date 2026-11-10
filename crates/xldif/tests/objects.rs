@@ -255,3 +255,22 @@ fn many_custom_row_heights_compare_quickly() {
     assert!(c.sheets[0].changes.is_empty());
     assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
 }
+
+#[test]
+fn rule_formulas_follow_inserted_rows() {
+    let c = pair(|wb, later| {
+        let ws = wb.add_worksheet();
+        let o = u32::from(later);
+        if later {
+            ws.write_string(0, 0, "inserted").unwrap();
+        }
+        for (i, item) in ["apple", "pear", "plum"].iter().enumerate() {
+            ws.write_string(1 + o + i as u32, 3, *item).unwrap();
+            ws.write_string(1 + o + i as u32, 0, format!("row {i}")).unwrap();
+        }
+        let list = if later { "=$D$3:$D$5" } else { "=$D$2:$D$4" };
+        let dv = DataValidation::new().allow_list_formula(list.into());
+        ws.add_data_validation(1 + o, 1, 3 + o, 1, &dv).unwrap();
+    });
+    assert!(of_kind(&c, Kind::Validation).is_empty(), "{:?}", of_kind(&c, Kind::Validation));
+}

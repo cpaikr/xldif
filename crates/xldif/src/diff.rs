@@ -481,9 +481,8 @@ fn workbook_objects(base: &Workbook, other: &Workbook, maps: &HashMap<String, Sh
             });
         }
     }
-    if let (Some(a), Some(b)) = (base.theme, other.theme)
-        && a != b
-    {
+    // A theme added, removed, or with a different color scheme.
+    if base.theme != other.theme {
         out.push(Change { id: "theme".into(), kind: Kind::Theme, ..blank() });
     }
     out

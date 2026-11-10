@@ -67,11 +67,9 @@ pub fn data_validation(e: &Element, p: &mut Parser<'_>) -> Result<RangeRule, Err
     let mut attrs: Vec<String> =
         e.attrs.iter().filter(|(k, _)| k != "sqref" && k != "uid").map(|(k, v)| format!("{k}={v}")).collect();
     attrs.sort();
-    let mut rule = attrs.join("; ");
-    for (name, text) in formulas {
-        let _ = write!(rule, "; {name}={text}");
-    }
-    Ok(RangeRule { ranges: parse_sqref(e.attr("sqref").unwrap_or_default()).into(), rule })
+    let rule = attrs.join("; ");
+    let formulas = formulas.into_iter().map(|(_, text)| text).collect();
+    Ok(RangeRule { ranges: parse_sqref(e.attr("sqref").unwrap_or_default()).into(), rule, formulas })
 }
 
 /// Reads a `<conditionalFormatting>` (just started): one rule per
@@ -102,11 +100,26 @@ pub fn conditional_formatting(
                 }
                 attrs.sort();
                 let mut rule = attrs.join("; ");
-                let children = p.describe_rest()?;
-                if !children.is_empty() {
-                    let _ = write!(rule, "; {children}");
+                // Formulas apart; every other child (color scales, data bars,
+                // icon sets, extensions) described as written.
+                let mut formulas = Vec::new();
+                let mut inner = 1;
+                while inner > 0 {
+                    match p.next()? {
+                        Event::Start(child) if child.name == "formula" => formulas.push(p.text_until_end(&[])?),
+                        Event::Start(child) => {
+                            let mut child_attrs: Vec<String> =
+                                child.attrs.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                            child_attrs.sort();
+                            let rest = p.describe_rest()?;
+                            let _ = write!(rule, "; {}({}){{{rest}}}", child.name, child_attrs.join(","));
+                        }
+                        Event::End(_) => inner -= 1,
+                        Event::Text(_) => {}
+                        Event::Eof => return Err(Error::new(ErrorCode::InvalidXml, "a rule is not closed")),
+                    }
                 }
-                rules.push(RangeRule { ranges: ranges.clone(), rule });
+                rules.push(RangeRule { ranges: ranges.clone(), rule, formulas });
             }
             Event::Start(_) => depth += 1,
             Event::End(_) => depth -= 1,

@@ -296,7 +296,8 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
     if !l.objects.is_empty() {
         out.push_str("\n[workbook]\n");
         for c in &l.objects {
-            let _ = writeln!(out, "{}", change_text(c));
+            // Workbook objects have no cell; their id names them (name:Rate).
+            let _ = writeln!(out, "{}\t{}", escape(&c.id), change_text(c));
         }
     }
     let omitted: usize = l.omitted.values().flat_map(|k| k.values()).sum();

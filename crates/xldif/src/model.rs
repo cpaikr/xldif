@@ -174,7 +174,11 @@ pub struct Comment {
 pub struct RangeRule {
     /// Shared by every rule of one `<conditionalFormatting>`.
     pub ranges: std::sync::Arc<[crate::cellref::Range]>,
+    /// Everything but the formulas, described canonically.
     pub rule: String,
+    /// The rule's formulas, as stored. They are compared after carrying
+    /// them through the alignment, as cell formulas are.
+    pub formulas: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
