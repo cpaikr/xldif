@@ -239,7 +239,11 @@ def display_parity(corpus: bool) -> None:
     for label, args in runs:
         proc = subprocess.run([sys.executable, "-I", script, *args], capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0:
-            print(proc.stdout if label == "probe" else "")
+            # The probe is synthetic, so its details are safe to print; the
+            # corpus stays silent.
+            if label == "probe":
+                print(proc.stdout)
+                print(proc.stderr, file=sys.stderr)
             fail(f"display parity: {label}")
         else:
             print(f"ok   display parity {label}")

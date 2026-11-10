@@ -45,6 +45,9 @@ fn locale_builtin(id: u32) -> &'static str {
     }
 }
 
+/// The longest format code Excel accepts.
+const MAX_CODE_CHARS: usize = 255;
+
 /// What a cell shows when its format cannot show the number.
 const NO_TEXT: &str = "########";
 
@@ -139,8 +142,11 @@ impl Cond {
             Op::Le => v <= self.rhs,
             Op::Gt => v > self.rhs,
             Op::Ge => v >= self.rhs,
-            Op::Eq => (v - self.rhs).abs() < f64::EPSILON,
-            Op::Ne => (v - self.rhs).abs() >= f64::EPSILON,
+            // Exact, as Excel compares: `[=0]` does not take 1e-17.
+            #[allow(clippy::float_cmp)]
+            Op::Eq => v == self.rhs,
+            #[allow(clippy::float_cmp)]
+            Op::Ne => v != self.rhs,
         }
     }
 }
@@ -177,7 +183,10 @@ pub struct Format {
 
 impl Format {
     pub fn parse(code: &str) -> Format {
-        if code.trim().is_empty() {
+        // Excel keeps codes to 255 characters; a longer one comes from
+        // another writer, and rendering it could repeat a huge literal in
+        // every cell that uses it. Such codes show as General.
+        if code.trim().is_empty() || code.chars().count() > MAX_CODE_CHARS {
             return Format::parse("General");
         }
         if let Some(id) = code.strip_prefix("builtin:") {
@@ -355,6 +364,7 @@ impl<'a> Formats<'a> {
         let text = f.display(v, self.date1904);
         match v {
             Value::Number(n) if text == general(*n) => None,
+            Value::Text(t) if text == **t => None,
             _ => Some(text),
         }
     }
@@ -1031,11 +1041,15 @@ fn render_fraction(toks: &[Tok], slash: usize, v: f64) -> (String, Option<bool>)
             }
             Tok::Slash => out.push(if blank { ' ' } else { '/' }),
             Tok::Denom(_) | Tok::Digit(_) if k == slash + 1 => {
+                // Missing digits: `0` placeholders pad with zeros on the
+                // left (`00/00` shows 0.5 as 01/02), `?` with spaces on the
+                // right, as Excel does.
                 let mut s = den_text.clone();
-                if fixed.is_none() {
-                    while s.len() < den_ph.len() {
-                        s.push(if den_ph[s.len()] == b'?' { ' ' } else { '0' });
-                    }
+                if fixed.is_none() && s.len() < den_ph.len() {
+                    let pad = den_ph.len() - s.len();
+                    let zeros = bytecount(&den_ph, b'0').min(pad);
+                    let spaces = bytecount(&den_ph, b'?').min(pad - zeros);
+                    s = format!("{}{s}{}", "0".repeat(zeros), " ".repeat(spaces));
                 }
                 out.push_str(&if blank { width_of(&s) } else { s });
             }
@@ -1313,6 +1327,9 @@ mod tests {
         assert_eq!(show("?/?", 12.5), "25/2");
         assert_eq!(show("??/??", 100.5), "201/2");
         assert_eq!(show("?/8", -0.01), "0/8");
+        assert_eq!(show("00/00", 0.5), "01/02");
+        assert_eq!(show("0/000", 0.125), "1/008");
+        assert_eq!(show("?/??", 0.5), "1/2");
     }
 
     #[test]
@@ -1367,6 +1384,8 @@ mod tests {
         let at = Format::parse("@");
         assert_eq!(at.display(&Value::Number(1.5), false), "1.5");
         assert!(!at.shapes(&Value::Text("x".into())));
+        let long = format!("0\"{}\"", "x".repeat(300));
+        assert!(Format::parse(&long).is_general(), "codes past Excel's limit show as General");
         assert!(Format::parse("General").is_general());
         assert!(!Format::parse("General").shapes(&Value::Number(1.0)));
     }
@@ -1383,6 +1402,8 @@ mod tests {
         assert_eq!(show("[>=0]0;0", -5.0), "5");
         assert_eq!(show("[>0]0;[<0]0", 0.0), NO_TEXT);
         assert_eq!(show("0;[<0]0", 5.0), "5");
+        assert_eq!(show("[=0]\"zero\";0.00E+00", 1e-17), "1.00E-17");
+        assert_eq!(show("[=0]\"zero\";0.00E+00", 0.0), "zero");
         assert_eq!(show("0.00;[<-10]0;0", 5.0), "5.00");
         assert_eq!(show("0.00;[<-10]0;0", -5.0), "-5");
         assert_eq!(show("[>100]0;0", -5.0), "-5");
