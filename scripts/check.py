@@ -4,14 +4,16 @@ smoke run of the built executable.
 
 Usage: python scripts/check.py
 
-Standard library only. Private samples under fixtures/private/ are only
-counted; output never names their files or prints their contents.
+Standard library only, except that the reader parity check runs
+scripts/parity.py, which needs openpyxl. Output never names private
+workbooks or prints their contents.
 """
 
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -82,16 +84,19 @@ def run_cargo() -> None:
             print(f"ok   cargo {args[0]}")
 
 
-def executable() -> Path:
-    """The debug `xldif` in Cargo's target directory, honoring CARGO_TARGET_DIR."""
+def target_dir() -> Path:
+    """Cargo's target directory, honoring CARGO_TARGET_DIR."""
     proc = subprocess.run(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, capture_output=True)
-    target = Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
-    return target / "debug" / ("xldif.exe" if sys.platform == "win32" else "xldif")
+    return Path(json.loads(proc.stdout)["target_directory"]) if proc.returncode == 0 else ROOT / "target"
+
+
+TARGET = target_dir()
+EXE = TARGET / "debug" / ("xldif.exe" if sys.platform == "win32" else "xldif")
 
 
 def cli_smoke() -> None:
     """The built executable honors the process contract outside the test harness."""
-    exe = executable()
+    exe = EXE
     if not exe.is_file():
         fail(f"{exe} is missing; cargo test builds it")
         return
@@ -108,10 +113,45 @@ def cli_smoke() -> None:
         fail("smoke: invalid invocation is not a JSON failure with exit 2")
     if len(errors) == before:
         print("ok   cli smoke")
-    if PRIVATE.is_dir():
-        books = [p for p in PRIVATE.rglob("*") if p.suffix.lower() in {".xlsx", ".xlsm"}]
-        # No command reads workbooks yet; the corpus smoke run arrives with `inspect`.
-        print(f"ok   private corpus present: {len(books)} workbooks (not yet exercised)")
+
+
+def private_books() -> list[Path]:
+    if not PRIVATE.is_dir():
+        return []
+    return sorted(p for p in PRIVATE.rglob("*") if p.suffix.lower() in {".xlsx", ".xlsm"} and not p.name.startswith("~$"))
+
+
+def parity() -> None:
+    """The reader agrees with openpyxl on the public fixtures and the private
+    corpus. The private run prints counts only (see scripts/parity.py)."""
+    have_openpyxl = subprocess.run([sys.executable, "-I", "-c", "import openpyxl"], capture_output=True).returncode == 0
+    if not have_openpyxl:
+        fail("parity: openpyxl is not installed (pip install openpyxl)")
+        return
+    # A directory of xldif's own, emptied first, so no stale or foreign
+    # workbook from a shared target directory joins the run.
+    fixtures = TARGET / "xldif-parity-fixtures"
+    shutil.rmtree(fixtures, ignore_errors=True)
+    proc = subprocess.run(
+        ["cargo", "run", "-q", "--locked", "-p", "xldif-fixtures", "--example", "write_fixtures", "--", str(fixtures)],
+        cwd=ROOT,
+    )
+    if proc.returncode != 0:
+        fail("parity: writing the fixtures failed")
+        return
+    script = str(ROOT / "scripts" / "parity.py")
+    public = sorted(str(p) for p in fixtures.glob("*.xlsx"))
+    # Public fixtures may show details; the private corpus reports counts only.
+    runs = [("public fixtures", ["--show"], public)]
+    private = [str(p) for p in private_books()]
+    if private:
+        runs.append((f"private corpus ({len(private)} workbooks)", [], private))
+    for label, flags, books in runs:
+        proc = subprocess.run([sys.executable, "-I", script, *flags, str(EXE), *books])
+        if proc.returncode != 0:
+            fail(f"parity: {label}")
+        else:
+            print(f"ok   parity {label}")
 
 
 def main() -> int:
@@ -120,6 +160,7 @@ def main() -> int:
             check_skill(skill)
     run_cargo()
     cli_smoke()
+    parity()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1

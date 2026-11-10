@@ -9,9 +9,11 @@ it. The process contract and report style follow `../dsdai`'s `dsd compare`
 (`render_html` in `crates/dsd/src/compare.rs`). The grid-alignment
 algorithm is new.
 
-Status: M0 (scaffold) done: workspace, process-contract skeleton, fixture
-helper, and `scripts/check.py`. Next action: M1, starting with the
-`package` module and a values-only reader.
+Status:
+- M0 (scaffold) is done.
+- M1 is in progress. Done: `package`, the values and formula-text reader,
+  `inspect`, `cells`, and openpyxl parity (clean on 29 private workbooks).
+- Next action: the values-only alignment spike and `compare`.
 
 ## Decisions
 
@@ -381,6 +383,15 @@ is proven on real files before the full reader is built.
 - **Alignment quality** on sheets without text labels: pure numeric grids
   and pivot-like layouts. Those fall back to value similarity alone, so
   tune and test them specifically in M1.
+- **Values hidden under merges:** Excel keeps values in a merged range's
+  non-anchor cells (the private corpus has them). The diff must decide
+  whether to report changes there, and say they are hidden.
+- **Unverified reader facts:** whether Excel's strict save writes `t="d"`
+  dates (they are read as text today, which would make strict and
+  transitional saves differ), whether `<f>` and `<definedName>` text uses
+  `_xHHHH_` escapes, the root element of macro sheets, and whether a cell
+  reference naming another row than its `<row>` really wins. Confirm each
+  on an Excel-saved file.
 - **Format facts from memory:** row `customFormat`, `dxf` `bgColor`, the
   threaded-comment fallback, and dynamic-array `cm` are not yet checked on
   real Excel files. Confirm each on a hand-made Excel file in the milestone
