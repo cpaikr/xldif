@@ -336,3 +336,39 @@ fn failure_run(run: Run) -> Run {
     assert_eq!(run.code, 1, "{}", run.stdout);
     run
 }
+
+#[test]
+fn html_grids_follow_the_alignment_whatever_is_listed() {
+    let work = Work::new();
+    let base =
+        work.file("a.xlsx", &xldif_fixtures::grid_book(&[("S", &[&["k", "v"], &["Cash", "1"], &["Debt", "2"]])]));
+    let other = work.file(
+        "b.xlsx",
+        &xldif_fixtures::grid_book(&[(
+            "S",
+            &[&["k", "v", "new"], &["Cash", "1", "x"], &["Loans", "9", ""], &["Debt", "3", "y"]],
+        )]),
+    );
+    let report = work.0.join("r.html");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--kind", "value"]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    // The inserted row is drawn (as a one-sided row) even though only values are listed.
+    assert!(html.contains("class=\"r ro"), "inserted row missing");
+    assert!(html.contains("Loans"));
+
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--force"]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    // The inserted column's header carries its change for navigation.
+    assert!(html.contains("<th class=\"ch co\" data-c="), "column change not marked");
+
+    let dir = work.0.join("a-dir");
+    std::fs::create_dir(&dir).unwrap();
+    let env = envelope(&failure_run(xldif(["compare", s(&base), s(&other), "-o", s(&dir), "--force"])));
+    assert_eq!(env["error"]["code"], "invalid_argument");
+    let leftovers: Vec<_> = std::fs::read_dir(&work.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temporary files left behind");
+}

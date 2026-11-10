@@ -6,14 +6,14 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** milestones M1–M3 done. `compare` reports value, formula, and
-format changes; inserted, deleted, and moved rows, columns, and sheets;
-row and column layout; and merges, comments, data validation, conditional
-formatting, hyperlinks, sheet visibility, defined names, and the theme.
-`--format html -o report.html` writes a self-contained side-by-side
-report for people. The [`xldif` agent skill](skills/xldif/SKILL.md) teaches
-agents to drive the CLI. See
-[PLAN.md](PLAN.md).
+**Status:** milestones M1–M5 done; no release is published yet. `compare`
+reports value, formula, and format changes; inserted, deleted, and moved
+rows, columns, and sheets; row and column layout; and merges, comments,
+data validation, conditional formatting, hyperlinks, sheet visibility,
+defined names, and the theme. `--format html -o report.html` writes a
+self-contained side-by-side report for people, and the
+[`xldif` agent skill](skills/xldif/SKILL.md) teaches agents to drive the
+CLI. See [PLAN.md](PLAN.md).
 
 ## Commands
 
