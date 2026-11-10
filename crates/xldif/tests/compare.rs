@@ -347,3 +347,45 @@ fn date_headers_label_and_pair_period_columns() {
     let labels = restated[0].labels.as_ref().unwrap();
     assert_eq!((labels.row.as_deref(), labels.column.as_deref()), (Some("Cash"), Some("2024-12-31")));
 }
+
+/// Invoices with a column of due dates (records, not headers), and
+/// optionally an amount column inserted before them.
+fn invoice_book(due: &[f64], amounts: bool) -> Vec<u8> {
+    use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet().set_name("S").unwrap();
+    let date = Format::new().set_num_format("yyyy-mm-dd");
+    let due_col = if amounts { 2 } else { 1 };
+    sheet.write_string(0, 0, "Invoice").unwrap();
+    sheet.write_string(0, due_col, "Due").unwrap();
+    if amounts {
+        sheet.write_string(0, 1, "Amount").unwrap();
+    }
+    for (r, d) in (1u32..).zip(due) {
+        sheet.write_string(r, 0, format!("INV-{r}")).unwrap();
+        sheet.write_number_with_format(r, due_col, *d, &date).unwrap();
+        if amounts {
+            sheet.write_number(r, 1, f64::from(r) * 10.0).unwrap();
+        }
+    }
+    book.save_to_buffer().unwrap()
+}
+
+#[test]
+fn date_records_do_not_key_their_column() {
+    // Every due date moves a year and an amount column is inserted: the
+    // due column still pairs, so its cells compare as value changes.
+    let base: Vec<f64> = (0..12).map(|k| 45_300.0 + f64::from(k)).collect();
+    let other: Vec<f64> = base.iter().map(|d| d + 366.0).collect();
+    let (b, o) = (read_bytes(invoice_book(&base, false)).unwrap(), read_bytes(invoice_book(&other, true)).unwrap());
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    let s = &c.sheets[0];
+    let columns: Vec<String> = s.changes.iter().filter(|c| c.kind == Kind::Column).map(describe).collect();
+    assert_eq!(columns.len(), 1, "only the amount column is new: {columns:?}");
+    let values = s.changes.iter().filter(|c| c.kind == Kind::Value).count();
+    assert_eq!(values, 12, "{:?}", brief(s));
+    assert_eq!(
+        s.changes.iter().find(|c| c.kind == Kind::Value).unwrap().labels.as_ref().unwrap().column.as_deref(),
+        Some("Due")
+    );
+}

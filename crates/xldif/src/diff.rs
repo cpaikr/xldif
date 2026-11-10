@@ -658,14 +658,11 @@ fn display_label(text: &str) -> String {
     if collapsed.chars().count() > 60 { collapsed.chars().take(60).collect::<String>() + "…" } else { collapsed }
 }
 
-/// A cell's text as a column header: text that is not a number, a
-/// date-formatted number as its ISO date, or a year stored as a number
-/// (period headers often are dates or years).
-fn header_text(cell: &Cell, formats: &Formats) -> Option<String> {
+/// A cell's text as a column header: text that is not a number, or a year
+/// stored as a number (period headers often are). Date headers are read in
+/// [`Grid::new`], which needs the cell below them.
+fn header_text(cell: &Cell) -> Option<String> {
     let year = |n: f64| n.fract() == 0.0 && (1900.0..=2100.0).contains(&n);
-    if let Some(date) = formats.iso_date(cell.style, &cell.value) {
-        return Some(date);
-    }
     match &cell.value {
         Value::Number(n) if year(*n) => Some(format!("{n}")),
         // "2025" typed as text is a year too; "2,025" is an amount.
@@ -709,13 +706,21 @@ impl<'a> Grid<'a> {
         }
         let cols: Vec<(u32, Vec<(u32, &Cell)>)> = by_col.into_iter().collect();
         let top: HashSet<u32> = rows.iter().take(HEADER_ROWS).map(|r| r.index).collect();
+        let date = |c: &Cell| formats.iso_date(c.style, &c.value);
         let headers = cols
             .iter()
             .map(|(col, cells)| {
                 let texts = cells
                     .iter()
-                    .filter(|(r, _)| top.contains(r))
-                    .filter_map(|(_, c)| header_text(c, formats))
+                    .enumerate()
+                    .filter(|(_, (r, _))| top.contains(r))
+                    .filter_map(|(i, (_, c))| match date(c) {
+                        // A date heads a period column (records below it are
+                        // not dates); in a column of due dates it is a
+                        // record, which must not key the column.
+                        Some(d) => cells.get(i + 1).is_some_and(|(_, next)| date(next).is_none()).then_some(d),
+                        None => header_text(c),
+                    })
                     .collect();
                 (*col, texts)
             })
