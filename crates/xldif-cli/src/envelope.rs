@@ -3,11 +3,24 @@
 //! Every JSON invocation prints one newline-terminated object:
 //! `{ok, command, result, warnings, error, metadata}`. `ok` is true exactly
 //! when the exit status is 0. `error.code` is a stable category; messages
-//! and hints are for people. Success envelopes arrive with the first command.
+//! and hints are for people.
 
+use serde::Serialize;
 use serde_json::{Value, json};
 
 pub const CONTRACT_VERSION: &str = "1";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Warning {
+    pub code: String,
+    pub message: String,
+}
+
+impl From<xldif::model::Warning> for Warning {
+    fn from(w: xldif::model::Warning) -> Self {
+        Self { code: w.code.to_owned(), message: w.message }
+    }
+}
 
 /// A failed invocation.
 #[derive(Debug)]
@@ -29,6 +42,12 @@ impl Failure {
     }
 }
 
+impl From<xldif::Error> for Failure {
+    fn from(e: xldif::Error) -> Self {
+        Self { code: e.code.as_str(), message: e.message, hint: e.hint, usage: false }
+    }
+}
+
 pub struct Envelope(Value);
 
 fn metadata() -> Value {
@@ -36,6 +55,19 @@ fn metadata() -> Value {
 }
 
 impl Envelope {
+    pub fn success(command: &str, result: Value, warnings: &[Warning]) -> Self {
+        let mut envelope = json!({
+            "ok": true,
+            "command": command,
+            "result": Value::Null,
+            "warnings": warnings,
+            "error": Value::Null,
+            "metadata": metadata(),
+        });
+        envelope["result"] = result;
+        Self(envelope)
+    }
+
     pub fn failure(command: &str, failure: &Failure) -> Self {
         let mut error = json!({"code": failure.code, "message": failure.message});
         if let Some(hint) = &failure.hint {

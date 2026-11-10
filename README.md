@@ -6,8 +6,18 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** scaffold (milestone M0). No commands exist yet; `inspect` and
-`compare` arrive with the reader. See [PLAN.md](PLAN.md).
+**Status:** milestone M1 in progress. The reader and the read views
+(`inspect`, `cells`) work; `compare` comes next. See [PLAN.md](PLAN.md).
+
+## Commands
+
+- `xldif inspect BOOK` shows sheets (kind, visibility, used range, cell and
+  formula counts), defined names, calculation settings, and the date system.
+  It prints no cell contents.
+- `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
+  with a value or formula: address, type, stored value, and formula text.
+
+Both accept `--format text`. Run `xldif <command> --help` for details.
 
 | Path | Purpose |
 |---|---|
@@ -30,11 +40,16 @@ The executable is `target/release/xldif` (`xldif.exe` on Windows).
 
 Every command prints one JSON object to stdout,
 `{ok, command, result, warnings, error, metadata}`, and exits 0 on success,
-1 on failure, and 2 on an invalid invocation. Help and `--version` are plain
-text.
+1 on failure, and 2 on an invalid invocation. Help, `--version`, and
+`--format text` views are plain text.
+
+Values are the results Excel last saved; xldif never recalculates. Warnings
+say when they may be stale.
 
 ## Checks
 
 ```bash
 python scripts/check.py
 ```
+
+The reader parity check needs `openpyxl` (`pip install openpyxl`).

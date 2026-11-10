@@ -8,11 +8,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
+quick-xml.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+xldif-fixtures.workspace = true

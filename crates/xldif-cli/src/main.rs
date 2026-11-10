@@ -1,15 +1,16 @@
 //! `xldif`: the process boundary. Parses arguments, runs one command, and
 //! writes exactly one stdout document: a JSON envelope, or plain text for
-//! help and `--version`. stderr stays empty.
+//! help, `--version`, and `--format text` views. stderr stays empty.
 
 mod cli;
+mod commands;
 mod envelope;
 
 use std::io::Write as _;
 use std::process::ExitCode;
 
+use clap::Parser as _;
 use clap::error::ErrorKind;
-use clap::{CommandFactory as _, Parser as _};
 
 use crate::cli::Cli;
 use crate::envelope::{Envelope, Failure};
@@ -26,10 +27,6 @@ fn command_name(argv: &[String]) -> String {
     argv.iter().skip(1).find(|a| !a.starts_with('-')).cloned().unwrap_or_default()
 }
 
-fn root_help() -> String {
-    Cli::command().render_help().to_string()
-}
-
 fn main() -> ExitCode {
     let argv_os: Vec<std::ffi::OsString> = std::env::args_os().collect();
     // Arguments that are not valid Unicode cannot name anything this tool
@@ -41,24 +38,41 @@ fn main() -> ExitCode {
         return ExitCode::from(failure.exit_code());
     };
     let pretty = argv.iter().any(|a| a == "--pretty");
-    match Cli::try_parse_from(&argv) {
-        // No commands exist yet, so any successful parse (bare `xldif`
-        // included) is a request for help. Bare `xldif` stays exactly
-        // `xldif --help` once commands arrive.
-        Ok(_) => {
-            write_stdout(&root_help());
-            ExitCode::SUCCESS
-        }
+    // Bare `xldif` is exactly `xldif --help`: the same parser renders both.
+    let parse_args = if argv.len() == 1 { vec![argv[0].clone(), "--help".to_owned()] } else { argv.clone() };
+    let cli = match Cli::try_parse_from(&parse_args) {
+        Ok(cli) => cli,
         Err(e) if matches!(e.kind(), ErrorKind::DisplayHelp | ErrorKind::DisplayVersion) => {
             write_stdout(&e.to_string());
-            ExitCode::SUCCESS
+            return ExitCode::SUCCESS;
         }
         Err(e) => {
             let rendered = e.to_string();
             let message =
                 rendered.lines().next().unwrap_or("invalid arguments").trim_start_matches("error: ").to_owned();
-            let failure = Failure::usage(message, "run `xldif --help` for commands".to_owned());
-            write_stdout(&Envelope::failure(&command_name(&argv), &failure).render(pretty));
+            let command = command_name(&argv);
+            let hint = if command.is_empty() || e.kind() == ErrorKind::InvalidSubcommand {
+                "run `xldif --help` for commands".to_owned()
+            } else {
+                format!("run `xldif {command} --help` for options and examples")
+            };
+            let failure = Failure::usage(message, hint);
+            write_stdout(&Envelope::failure(&command, &failure).render(pretty));
+            return ExitCode::from(failure.exit_code());
+        }
+    };
+    let name = cli.command.name();
+    match commands::run(cli.command) {
+        Ok(commands::Output::Text(text)) => {
+            write_stdout(&text);
+            ExitCode::SUCCESS
+        }
+        Ok(commands::Output::Json { result, warnings }) => {
+            write_stdout(&Envelope::success(name, result, &warnings).render(cli.pretty));
+            ExitCode::SUCCESS
+        }
+        Err(failure) => {
+            write_stdout(&Envelope::failure(name, &failure).render(cli.pretty));
             ExitCode::from(failure.exit_code())
         }
     }
