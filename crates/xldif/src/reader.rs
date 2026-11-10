@@ -4,31 +4,60 @@
 //!
 //! Formatting resolution, comments, and other objects arrive in M3.
 
+use std::collections::HashMap;
 use std::io::{Read, Seek};
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::cellref::{MAX_COL, MAX_ROW, parse_cell};
 use crate::model::{
     BookFormat, CalcMode, Calculation, Cell, DefinedName, Formula, FormulaKind, Row, Sheet, SheetKind, Value,
     Visibility, Warning, Workbook,
 };
-use crate::package::{Package, Relationship};
+use crate::package::{Limits, Package, Relationship};
 use crate::xml::{Event, Parser, decode_xstring};
 use crate::{Error, ErrorCode};
 
-/// Written cells across one workbook, a bound on memory (~100 bytes each).
-pub const MAX_CELLS: usize = 10_000_000;
+/// Child elements of a string item that are not part of its text: phonetic
+/// readings shown above East Asian text.
+const PHONETIC: &[&str] = &["rPh", "phoneticPr"];
 
 pub fn read_path(path: &Path) -> Result<Workbook, Error> {
-    read_package(&mut Package::open(path)?)
+    read_path_with(path, &Limits::default())
+}
+
+pub fn read_path_with(path: &Path, limits: &Limits) -> Result<Workbook, Error> {
+    read_package(&mut Package::open(path, limits)?, limits)
 }
 
 pub fn read_bytes(bytes: Vec<u8>) -> Result<Workbook, Error> {
-    read_package(&mut Package::from_bytes(bytes)?)
+    read_bytes_with(bytes, &Limits::default())
+}
+
+pub fn read_bytes_with(bytes: Vec<u8>, limits: &Limits) -> Result<Workbook, Error> {
+    read_package(&mut Package::from_bytes(bytes, limits)?, limits)
 }
 
 fn missing(part: &str) -> Error {
     Error::new(ErrorCode::InvalidXml, format!("the workbook has no {part} part"))
+}
+
+/// Counts records (cells, rows, shared strings, sheets, names) against
+/// [`Limits::max_records`], so memory stays proportional to the limit
+/// whatever the file's compression ratio.
+struct Budget {
+    left: usize,
+    limit: usize,
+}
+
+impl Budget {
+    fn take(&mut self) -> Result<(), Error> {
+        self.left = self.left.checked_sub(1).ok_or_else(|| {
+            Error::new(ErrorCode::InvalidArchive, format!("the workbook has more than {} records", self.limit))
+                .with_hint("cells, rows, shared strings, sheets, and names all count toward this bound")
+        })?;
+        Ok(())
+    }
 }
 
 /// A `<sheet>` entry of `workbook.xml` before its part is read.
@@ -38,10 +67,10 @@ struct SheetEntry {
     rel_id: String,
 }
 
-/// Defined names keep their `localSheetId` until sheet names are known.
+/// Defined names keep their raw `localSheetId` until sheet names are known.
 struct NameEntry {
     name: String,
-    local_sheet: Option<usize>,
+    local_sheet: Option<String>,
     refers_to: String,
     hidden: bool,
 }
@@ -53,7 +82,7 @@ struct WorkbookPart {
     calculation: Calculation,
 }
 
-fn read_package<R: Read + Seek>(pkg: &mut Package<R>) -> Result<Workbook, Error> {
+fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result<Workbook, Error> {
     let root = pkg.relationships("")?;
     let workbook_part = root
         .iter()
@@ -67,24 +96,24 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>) -> Result<Workbook, Error>
     }
     let format = if content_type.contains("macroEnabled") { BookFormat::Xlsm } else { BookFormat::Xlsx };
 
+    let mut budget = Budget { left: limits.max_records, limit: limits.max_records };
     let text = pkg.read_text(&workbook_part)?.ok_or_else(|| missing(&workbook_part))?;
-    let wb = parse_workbook(&text, &workbook_part)?;
+    let wb = parse_workbook(&text, &workbook_part, &mut budget)?;
     let rels = pkg.relationships(&workbook_part)?;
-    let target = |id: &str| rels.iter().find(|r| r.id == id);
+    let by_id: HashMap<&str, &Relationship> = rels.iter().map(|r| (r.id.as_str(), r)).collect();
 
     let shared = match rels.iter().find(|r| r.kind == "sharedStrings") {
         Some(rel) => match pkg.read_text(&rel.target)? {
-            Some(text) => parse_shared_strings(&text, &rel.target)?,
+            Some(text) => parse_shared_strings(&text, &rel.target, &mut budget)?,
             None => Vec::new(),
         },
         None => Vec::new(),
     };
 
     let mut warnings = Vec::new();
-    let mut budget = MAX_CELLS;
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     for entry in &wb.sheets {
-        let rel: Option<&Relationship> = target(&entry.rel_id);
+        let rel = by_id.get(entry.rel_id.as_str()).copied();
         let kind = match rel.map(|r| r.kind.as_str()) {
             Some("chartsheet") => SheetKind::Chartsheet,
             Some("dialogsheet") => SheetKind::Dialogsheet,
@@ -110,16 +139,27 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>) -> Result<Workbook, Error>
         sheets.push(sheet);
     }
 
-    let defined_names = wb
-        .names
-        .into_iter()
-        .map(|n| DefinedName {
-            scope: n.local_sheet.and_then(|i| sheets.get(i)).map(|s| s.name.clone()),
-            name: n.name,
-            refers_to: n.refers_to,
-            hidden: n.hidden,
-        })
-        .collect();
+    let mut defined_names = Vec::with_capacity(wb.names.len());
+    for n in wb.names {
+        let scope = if let Some(id) = &n.local_sheet {
+            let Some(sheet) = id.parse::<usize>().ok().and_then(|i| sheets.get(i)) else {
+                // Promoting it to workbook scope could collide with a real
+                // workbook-level name of the same spelling.
+                warnings.push(Warning {
+                    code: "defined_name_scope_invalid",
+                    message: format!(
+                        "defined name {:?} names sheet index {id:?}, which does not exist; it is left out",
+                        n.name
+                    ),
+                });
+                continue;
+            };
+            Some(sheet.name.clone())
+        } else {
+            None
+        };
+        defined_names.push(DefinedName { name: n.name, scope, refers_to: n.refers_to, hidden: n.hidden });
+    }
     Ok(Workbook { format, date1904: wb.date1904, calculation: wb.calculation, sheets, defined_names, warnings })
 }
 
@@ -127,7 +167,7 @@ fn truthy(v: Option<&str>) -> bool {
     matches!(v, Some("1" | "true"))
 }
 
-fn parse_workbook(text: &str, part: &str) -> Result<WorkbookPart, Error> {
+fn parse_workbook(text: &str, part: &str, budget: &mut Budget) -> Result<WorkbookPart, Error> {
     let mut p = Parser::new(text, part);
     let mut wb = WorkbookPart {
         sheets: Vec::new(),
@@ -135,6 +175,20 @@ fn parse_workbook(text: &str, part: &str) -> Result<WorkbookPart, Error> {
         date1904: false,
         calculation: Calculation { mode: CalcMode::Auto, full_calc_on_load: false },
     };
+    // The officeDocument of a Word or PowerPoint file is not a workbook.
+    let root = loop {
+        match p.next()? {
+            Event::Text(t) if t.trim().is_empty() => {}
+            other => break other,
+        }
+    };
+    match root {
+        Event::Start(e) if e.name == "workbook" => {}
+        _ => {
+            return Err(Error::new(ErrorCode::UnsupportedFormat, "the file is an Office document but not a workbook")
+                .with_hint("xldif compares Excel workbooks (.xlsx, .xlsm)"));
+        }
+    }
     loop {
         match p.next()? {
             Event::Start(e) => match e.name.as_str() {
@@ -148,6 +202,7 @@ fn parse_workbook(text: &str, part: &str) -> Result<WorkbookPart, Error> {
                     wb.calculation.full_calc_on_load = truthy(e.attr("fullCalcOnLoad"));
                 }
                 "sheet" => {
+                    budget.take()?;
                     let (Some(name), Some(rel_id)) = (e.attr("name"), e.attr("id")) else {
                         return Err(Error::new(ErrorCode::InvalidXml, format!("{part}: a sheet lacks name or r:id")));
                     };
@@ -159,15 +214,16 @@ fn parse_workbook(text: &str, part: &str) -> Result<WorkbookPart, Error> {
                     wb.sheets.push(SheetEntry { name: name.to_owned(), visibility, rel_id: rel_id.to_owned() });
                 }
                 "definedName" => {
+                    budget.take()?;
                     let name = e.attr("name").unwrap_or_default().to_owned();
-                    let local_sheet = e.attr("localSheetId").and_then(|v| v.parse().ok());
+                    let local_sheet = e.attr("localSheetId").map(str::to_owned);
                     let hidden = truthy(e.attr("hidden"));
                     let refers_to = p.text_until_end(&[])?;
                     wb.names.push(NameEntry { name, local_sheet, refers_to, hidden });
                 }
                 // Nothing else in workbook.xml matters yet; skip whole subtrees
                 // so their children (extLst, fileVersion…) cost nothing.
-                "workbook" | "sheets" | "definedNames" => {}
+                "sheets" | "definedNames" => {}
                 _ => p.skip_element()?,
             },
             Event::Eof => return Ok(wb),
@@ -176,14 +232,18 @@ fn parse_workbook(text: &str, part: &str) -> Result<WorkbookPart, Error> {
     }
 }
 
-/// The shared string table: each `<si>` flattened to plain text. Phonetic
-/// guides (`<rPh>`, furigana-style readings) are not part of the text.
-fn parse_shared_strings(text: &str, part: &str) -> Result<Vec<String>, Error> {
+/// The shared string table: each `<si>` flattened to the text of its `<t>`
+/// elements, without phonetic readings. Whitespace between elements (an
+/// indented part) is not text.
+fn parse_shared_strings(text: &str, part: &str, budget: &mut Budget) -> Result<Vec<Arc<str>>, Error> {
     let mut p = Parser::new(text, part);
     let mut out = Vec::new();
     loop {
         match p.next()? {
-            Event::Start(e) if e.name == "si" => out.push(decode_xstring(&p.text_until_end(&["rPh", "phoneticPr"])?)),
+            Event::Start(e) if e.name == "si" => {
+                budget.take()?;
+                out.push(Arc::from(decode_xstring(&p.text_of("t", PHONETIC)?)));
+            }
             Event::Eof => return Ok(out),
             _ => {}
         }
@@ -201,9 +261,9 @@ struct RawCell {
 fn parse_sheet(
     text: &str,
     part: &str,
-    shared: &[String],
+    shared: &[Arc<str>],
     sheet: &mut Sheet,
-    budget: &mut usize,
+    budget: &mut Budget,
     warnings: &mut Vec<Warning>,
 ) -> Result<(), Error> {
     let mut p = Parser::new(text, part);
@@ -211,25 +271,34 @@ fn parse_sheet(
     let mut next_row = 1u32;
     let mut next_col = 1u32;
     let mut bad_values = 0usize;
+    // Rows without cells carry only formatting, which M3 reads; they are
+    // not kept, so a part full of empty `<row/>` costs no memory.
+    let finish = |row: Option<Row>, rows: &mut Vec<Row>| {
+        if let Some(done) = row.filter(|r| !r.cells.is_empty()) {
+            rows.push(done);
+        }
+    };
+    let out_of_grid = |what: &str| Error::new(ErrorCode::InvalidXml, format!("{part}: {what} is outside the grid"));
     loop {
         match p.next()? {
             Event::Start(e) => match e.name.as_str() {
                 "dimension" => sheet.dimension = e.attr("ref").map(str::to_owned),
                 "row" => {
-                    if let Some(done) = row.take() {
-                        sheet.rows.push(done);
-                    }
+                    budget.take()?;
+                    finish(row.take(), &mut sheet.rows);
                     let index = match e.attr("r") {
-                        Some(r) => r.parse().ok().filter(|r| (1..=MAX_ROW).contains(r)).ok_or_else(|| {
-                            Error::new(ErrorCode::InvalidXml, format!("{part}: row number {r:?} is out of range"))
-                        })?,
+                        Some(r) => r.parse().map_err(|_| out_of_grid(&format!("row number {r:?}")))?,
                         None => next_row,
                     };
+                    if !(1..=MAX_ROW).contains(&index) {
+                        return Err(out_of_grid(&format!("row {index}")));
+                    }
                     next_row = index + 1;
                     next_col = 1;
                     row = Some(Row { index, cells: Vec::new() });
                 }
                 "c" => {
+                    budget.take()?;
                     let (row_index, col) = match e.attr("r").map(|r| (r, parse_cell(r))) {
                         Some((_, Some(rc))) => rc,
                         Some((r, None)) => {
@@ -237,20 +306,16 @@ fn parse_sheet(
                         }
                         None => (row.as_ref().map_or(next_row, |r| r.index), next_col),
                     };
-                    if col > MAX_COL {
-                        return Err(Error::new(ErrorCode::InvalidXml, format!("{part}: column beyond XFD")));
+                    if !(1..=MAX_ROW).contains(&row_index) || col > MAX_COL {
+                        return Err(out_of_grid(&format!("a cell in row {row_index}, column {col}")));
                     }
                     next_col = col + 1;
-                    let current = row.get_or_insert_with(|| Row { index: row_index, cells: Vec::new() });
-                    if current.index != row_index {
+                    if row.as_ref().is_some_and(|r| r.index != row_index) {
                         // A cell reference naming another row than its <row>:
-                        // trust the reference, as Excel does.
-                        let done = std::mem::replace(current, Row { index: row_index, cells: Vec::new() });
-                        sheet.rows.push(done);
+                        // the reference wins (unverified against Excel).
+                        finish(row.take(), &mut sheet.rows);
                     }
-                    *budget = budget.checked_sub(1).ok_or_else(|| {
-                        Error::new(ErrorCode::InvalidArchive, format!("the workbook has more than {MAX_CELLS} cells"))
-                    })?;
+                    let current = row.get_or_insert_with(|| Row { index: row_index, cells: Vec::new() });
                     let style = e.attr("s").and_then(|s| s.parse().ok()).unwrap_or(0);
                     let kind = e.attr("t").unwrap_or("n").to_owned();
                     let raw = parse_cell_children(&mut p)?;
@@ -258,26 +323,22 @@ fn parse_sheet(
                         Ok(v) => v,
                         Err(raw) => {
                             bad_values += 1;
-                            Value::Text(raw)
+                            Value::Text(raw.into())
                         }
                     };
-                    row.as_mut().expect("row set above").cells.push(Cell { col, value, formula: raw.formula, style });
+                    current.cells.push(Cell { col, value, formula: raw.formula, style });
                 }
-                "worksheet" | "sheetData" => {}
+                // Macro and dialog sheets share the worksheet's cell layout
+                // (macrosheet roots are unverified against an Excel-saved file).
+                "worksheet" | "macrosheet" | "dialogsheet" | "sheetData" => {}
                 _ => p.skip_element()?,
             },
-            Event::End(name) if name == "sheetData" => {
-                if let Some(done) = row.take() {
-                    sheet.rows.push(done);
-                }
-            }
+            Event::End(name) if name == "sheetData" => finish(row.take(), &mut sheet.rows),
             Event::Eof => break,
             _ => {}
         }
     }
-    if let Some(done) = row.take() {
-        sheet.rows.push(done);
-    }
+    finish(row.take(), &mut sheet.rows);
     normalize(&mut sheet.rows);
     if bad_values > 0 {
         warnings.push(Warning {
@@ -294,7 +355,7 @@ fn parse_cell_children(p: &mut Parser<'_>) -> Result<RawCell, Error> {
         match p.next()? {
             Event::Start(e) => match e.name.as_str() {
                 "v" => raw.value = Some(p.text_until_end(&[])?),
-                "is" => raw.inline = Some(decode_xstring(&p.text_until_end(&["rPh", "phoneticPr"])?)),
+                "is" => raw.inline = Some(decode_xstring(&p.text_of("t", PHONETIC)?)),
                 "f" => {
                     let kind = match e.attr("t") {
                         Some("shared") => FormulaKind::Shared,
@@ -318,24 +379,27 @@ fn parse_cell_children(p: &mut Parser<'_>) -> Result<RawCell, Error> {
 
 /// Types a cell's stored value by its `t` attribute. `Err` carries raw text
 /// that does not fit the declared type.
-fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared: &[String]) -> Result<Value, String> {
+fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared: &[Arc<str>]) -> Result<Value, String> {
     if kind == "inlineStr" {
-        return Ok(inline.map_or(Value::Empty, Value::Text));
+        return Ok(inline.map_or(Value::Empty, |t| Value::Text(t.into())));
     }
     let Some(v) = value else {
         return Ok(Value::Empty);
     };
     match kind {
-        "s" => v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)).map(|s| Value::Text(s.clone())).ok_or(v),
-        "str" => Ok(Value::Text(decode_xstring(&v))),
+        // Cells share the table's string rather than copying it, so many
+        // cells naming one long string cost one copy.
+        "s" => v.trim().parse::<usize>().ok().and_then(|i| shared.get(i)).map(|s| Value::Text(Arc::clone(s))).ok_or(v),
+        "str" => Ok(Value::Text(decode_xstring(&v).into())),
         "b" => match v.trim() {
             "1" | "true" => Ok(Value::Bool(true)),
             "0" | "false" => Ok(Value::Bool(false)),
             _ => Err(v),
         },
         "e" => Ok(Value::Error(v)),
-        // ISO 8601 dates are rare (Excel itself never writes them); keep the text.
-        "d" => Ok(Value::Text(v)),
+        // ISO 8601 dates. Excel's transitional saves use serial numbers; a
+        // strict save may use these (unverified), so keep the text.
+        "d" => Ok(Value::Text(v.into())),
         _ => match v.trim() {
             "" => Ok(Value::Empty),
             t => t.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Number).ok_or(v),
@@ -343,28 +407,23 @@ fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared:
     }
 }
 
-/// Sorts rows and cells, merging rows split by out-of-order references; a
-/// later duplicate of the same cell wins.
+/// Sorts rows and cells in place, merging rows split by out-of-order
+/// references; a later duplicate of the same cell wins (the sorts are stable).
 fn normalize(rows: &mut Vec<Row>) {
     rows.sort_by_key(|r| r.index);
-    let mut merged: Vec<Row> = Vec::with_capacity(rows.len());
-    for row in rows.drain(..) {
-        match merged.last_mut() {
-            Some(last) if last.index == row.index => last.cells.extend(row.cells),
-            _ => merged.push(row),
+    rows.dedup_by(|later, earlier| {
+        if later.index == earlier.index {
+            earlier.cells.append(&mut later.cells);
+            true
+        } else {
+            false
         }
-    }
-    for row in &mut merged {
+    });
+    for row in rows.iter_mut() {
         row.cells.sort_by_key(|c| c.col);
-        let mut deduped: Vec<Cell> = Vec::with_capacity(row.cells.len());
-        for cell in row.cells.drain(..) {
-            match deduped.last_mut() {
-                Some(last) if last.col == cell.col => *last = cell,
-                _ => deduped.push(cell),
-            }
-        }
-        row.cells = deduped;
+        // `dedup_by` keeps the first of a run; reverse so the last written wins.
+        row.cells.reverse();
+        row.cells.dedup_by_key(|c| c.col);
+        row.cells.reverse();
     }
-    merged.retain(|r| !r.cells.is_empty());
-    *rows = merged;
 }

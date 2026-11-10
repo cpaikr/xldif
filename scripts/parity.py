@@ -44,14 +44,14 @@ def xldif(exe: str, *args: str) -> dict:
     return env["result"]
 
 
-def theirs_formula(value) -> str | None:
+def theirs_formula(value, data_type: str) -> str | None:
+    """The formula text openpyxl read, by its cell type: a text cell that
+    merely starts with "=" is not a formula."""
+    if data_type != "f" or isinstance(value, DataTableFormula):
+        return None
     if isinstance(value, ArrayFormula):
         return value.text
-    if isinstance(value, DataTableFormula):
-        return None
-    if isinstance(value, str) and value.startswith("="):
-        return value
-    return None
+    return value
 
 
 XSTRING = re.compile(r"_x([0-9A-Fa-f]{4})_")
@@ -61,7 +61,9 @@ def decode_xstring(text: str) -> str:
     return XSTRING.sub(lambda m: chr(int(m.group(1), 16)), text)
 
 
-def same_value(ours: dict, theirs, epoch) -> bool:
+def same_value(ours: dict, theirs, data_type: str, epoch) -> bool:
+    """Strings must match openpyxl's after decoding the `_xHHHH_` escapes
+    it leaves in place, and error literals must be typed as errors."""
     kind = ours["type"]
     value = ours.get("value")
     if isinstance(theirs, (dt.datetime, dt.date, dt.time, dt.timedelta)):
@@ -73,7 +75,8 @@ def same_value(ours: dict, theirs, epoch) -> bool:
     if isinstance(theirs, (int, float)):
         return kind == "number" and float(theirs) == value
     if isinstance(theirs, str):
-        return kind in ("text", "error") and value in (theirs, decode_xstring(theirs))
+        expected_kind = "error" if data_type == "e" else "text"
+        return kind == expected_kind and value == decode_xstring(theirs)
     return False
 
 
@@ -92,7 +95,8 @@ def check_book(exe: str, path: str, label: str, show: bool, tally: Counter) -> N
         for row in f_ws.iter_rows():
             for cell in row:
                 if cell.value is not None:
-                    theirs[cell.coordinate] = (cell.value, v_ws[cell.coordinate].value)
+                    cached = v_ws[cell.coordinate]
+                    theirs[cell.coordinate] = (cell.value, cell.data_type, cached.value, cached.data_type)
         for coord in sorted(set(ours) | set(theirs)):
             mine = ours.get(coord)
             if coord not in theirs:
@@ -107,11 +111,11 @@ def check_book(exe: str, path: str, label: str, show: bool, tally: Counter) -> N
                     continue
                 report(tally, show, label, name, coord, "cell only in xldif", mine, None)
                 continue
-            raw, cached = theirs[coord]
+            raw, raw_type, cached, cached_type = theirs[coord]
             if mine is None:
                 report(tally, show, label, name, coord, "cell only in openpyxl", None, raw)
                 continue
-            expected_formula = theirs_formula(raw)
+            expected_formula = theirs_formula(raw, raw_type)
             if mine.get("formulaKind") == "shared" and mine.get("formula") == "":
                 tally["skipped: shared formula follower"] += 1
             elif mine.get("formulaKind") == "dataTable":
@@ -121,7 +125,7 @@ def check_book(exe: str, path: str, label: str, show: bool, tally: Counter) -> N
                 if got != expected_formula:
                     report(tally, show, label, name, coord, "formula differs", got, expected_formula)
                     continue
-            if not same_value(mine, cached, epoch):
+            if not same_value(mine, cached, cached_type, epoch):
                 report(tally, show, label, name, coord, "value differs", mine, cached)
                 continue
             tally["agree"] += 1

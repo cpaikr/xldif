@@ -386,6 +386,12 @@ is proven on real files before the full reader is built.
 - **Values hidden under merges:** Excel keeps values in a merged range's
   non-anchor cells (the private corpus has them). The diff must decide
   whether to report changes there, and say they are hidden.
+- **Unverified reader facts:** whether Excel's strict save writes `t="d"`
+  dates (they are read as text today, which would make strict and
+  transitional saves differ), whether `<f>` and `<definedName>` text uses
+  `_xHHHH_` escapes, the root element of macro sheets, and whether a cell
+  reference naming another row than its `<row>` really wins. Confirm each
+  on an Excel-saved file.
 - **Format facts from memory:** row `customFormat`, `dxf` `bgColor`, the
   threaded-comment fallback, and dynamic-array `cm` are not yet checked on
   real Excel files. Confirm each on a hand-made Excel file in the milestone

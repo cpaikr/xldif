@@ -15,10 +15,32 @@ use zip::ZipArchive;
 use crate::xml::{Event, Parser};
 use crate::{Error, ErrorCode};
 
-pub const MAX_FILE_BYTES: u64 = 1 << 30;
-pub const MAX_MEMBERS: usize = 20_000;
-pub const MAX_MEMBER_BYTES: u64 = 1 << 30;
-pub const MAX_TOTAL_BYTES: u64 = 4 << 30;
+/// Bounds on what one workbook may make the reader do. The defaults sit far
+/// above real workbooks; tests lower them to exercise each bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    pub max_file_bytes: u64,
+    pub max_members: usize,
+    /// One member's decompressed size, measured while reading.
+    pub max_member_bytes: u64,
+    /// All members read from one workbook, decompressed.
+    pub max_total_bytes: u64,
+    /// Cells, rows, shared strings, sheets, and defined names together
+    /// (about 100 bytes of memory each).
+    pub max_records: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            max_file_bytes: 1 << 30,
+            max_members: 20_000,
+            max_member_bytes: 1 << 30,
+            max_total_bytes: 4 << 30,
+            max_records: 20_000_000,
+        }
+    }
+}
 
 const ZIP_MAGIC: &[u8] = b"PK\x03\x04";
 /// OLE compound files: legacy `.xls`, and password-protected OOXML workbooks.
@@ -43,6 +65,7 @@ pub struct Package<R> {
     /// Lower-cased member name → actual name; some generators vary case.
     names: HashMap<String, String>,
     read_total: u64,
+    limits: Limits,
 }
 
 /// Classifies the first bytes of a file before treating it as a ZIP.
@@ -61,15 +84,15 @@ fn check_magic(head: &[u8]) -> Result<(), Error> {
 }
 
 impl Package<File> {
-    pub fn open(path: &Path) -> Result<Self, Error> {
+    pub fn open(path: &Path, limits: &Limits) -> Result<Self, Error> {
         let meta = std::fs::metadata(path).map_err(|_| {
             Error::new(ErrorCode::FileNotFound, format!("{} does not exist or is not readable", path.display()))
         })?;
         if !meta.is_file() {
             return Err(Error::new(ErrorCode::FileNotFound, format!("{} is not a file", path.display())));
         }
-        if meta.len() > MAX_FILE_BYTES {
-            return Err(invalid(format!("the file is larger than {} MiB", MAX_FILE_BYTES >> 20)));
+        if meta.len() > limits.max_file_bytes {
+            return Err(invalid(format!("the file is larger than {} bytes", limits.max_file_bytes)));
         }
         let io = |e: std::io::Error| Error::new(ErrorCode::IoError, format!("reading {}: {e}", path.display()));
         let mut file = File::open(path).map_err(io)?;
@@ -77,30 +100,33 @@ impl Package<File> {
         let n = file.read(&mut head).map_err(io)?;
         check_magic(&head[..n])?;
         file.rewind().map_err(io)?;
-        Self::new(file)
+        Self::new(file, limits)
     }
 }
 
 impl Package<std::io::Cursor<Vec<u8>>> {
     /// A workbook held in memory, checked to start like a ZIP.
-    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self, Error> {
+    pub fn from_bytes(bytes: Vec<u8>, limits: &Limits) -> Result<Self, Error> {
+        if bytes.len() as u64 > limits.max_file_bytes {
+            return Err(invalid(format!("the file is larger than {} bytes", limits.max_file_bytes)));
+        }
         check_magic(&bytes[..bytes.len().min(8)])?;
-        Self::new(std::io::Cursor::new(bytes))
+        Self::new(std::io::Cursor::new(bytes), limits)
     }
 }
 
 impl<R: Read + Seek> Package<R> {
-    pub fn new(reader: R) -> Result<Self, Error> {
+    pub fn new(reader: R, limits: &Limits) -> Result<Self, Error> {
         let archive = ZipArchive::new(reader).map_err(|e| invalid(format!("the ZIP container is unreadable: {e}")))?;
-        if archive.len() > MAX_MEMBERS {
-            return Err(invalid(format!("the archive has more than {MAX_MEMBERS} members")));
+        if archive.len() > limits.max_members {
+            return Err(invalid(format!("the archive has more than {} members", limits.max_members)));
         }
         let mut names = HashMap::new();
         for name in archive.file_names() {
             let name = name.map_err(|e| invalid(format!("a member name is unreadable: {e}")))?;
             names.insert(name.to_ascii_lowercase(), name.into_owned());
         }
-        Ok(Self { archive, names, read_total: 0 })
+        Ok(Self { archive, names, read_total: 0, limits: *limits })
     }
 
     /// The member as UTF-8 text (a leading BOM dropped), or `None` when absent.
@@ -108,24 +134,29 @@ impl<R: Read + Seek> Package<R> {
         let Some(actual) = self.names.get(&name.to_ascii_lowercase()).cloned() else {
             return Ok(None);
         };
+        let Limits { max_member_bytes, max_total_bytes, .. } = self.limits;
+        let room = max_member_bytes.min(max_total_bytes.saturating_sub(self.read_total));
         let mut member = self.archive.by_name(&actual).map_err(|e| invalid(format!("{actual}: {e}")))?;
         let mut bytes = Vec::new();
         (&mut member)
-            .take(MAX_MEMBER_BYTES + 1)
+            .take(room + 1)
             .read_to_end(&mut bytes)
             .map_err(|e| invalid(format!("{actual} cannot be decompressed: {e}")))?;
         drop(member);
         let len = bytes.len() as u64;
-        if len > MAX_MEMBER_BYTES {
-            return Err(invalid(format!("{actual} decompresses to more than {} MiB", MAX_MEMBER_BYTES >> 20)));
+        if len > max_member_bytes {
+            return Err(invalid(format!("{actual} decompresses to more than {max_member_bytes} bytes")));
+        }
+        if len > room {
+            return Err(invalid(format!("the workbook decompresses to more than {max_total_bytes} bytes")));
         }
         self.read_total += len;
-        if self.read_total > MAX_TOTAL_BYTES {
-            return Err(invalid(format!("the workbook decompresses to more than {} GiB", MAX_TOTAL_BYTES >> 30)));
-        }
-        let text = String::from_utf8(bytes)
+        let mut text = String::from_utf8(bytes)
             .map_err(|_| Error::new(ErrorCode::InvalidXml, format!("{actual} is not UTF-8 text")))?;
-        Ok(Some(text.strip_prefix('\u{feff}').map(str::to_owned).unwrap_or(text)))
+        if text.starts_with('\u{feff}') {
+            text.drain(..'\u{feff}'.len_utf8());
+        }
+        Ok(Some(text))
     }
 
     /// The relationships of `part` (from `<dir>/_rels/<file>.rels`), with
@@ -212,7 +243,7 @@ fn resolve(dir: &str, target: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Package, resolve};
+    use super::{Limits, Package, resolve};
     use crate::ErrorCode;
 
     #[test]
@@ -226,9 +257,9 @@ mod tests {
     #[test]
     fn non_zip_input_is_classified() {
         let ole = [0xD0u8, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
-        let err = Package::from_bytes(ole.to_vec()).err().unwrap();
+        let err = Package::from_bytes(ole.to_vec(), &Limits::default()).err().unwrap();
         assert_eq!(err.code, ErrorCode::UnsupportedFormat);
-        let err = Package::from_bytes(b"hello".to_vec()).err().unwrap();
+        let err = Package::from_bytes(b"hello".to_vec(), &Limits::default()).err().unwrap();
         assert_eq!(err.code, ErrorCode::InvalidArchive);
     }
 }

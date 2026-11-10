@@ -50,7 +50,9 @@ pub enum Value {
     /// No value: a formatting-only cell, or a formula without a cached result.
     Empty,
     Number(f64),
-    Text(String),
+    /// Shared with the workbook's string table: cells repeating one string
+    /// hold one copy.
+    Text(std::sync::Arc<str>),
     Bool(bool),
     /// An error literal such as `#DIV/0!`.
     Error(String),

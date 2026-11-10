@@ -13,4 +13,5 @@ pub mod views;
 mod xml;
 
 pub use error::{Error, ErrorCode};
-pub use reader::{read_bytes, read_path};
+pub use package::Limits;
+pub use reader::{read_bytes, read_bytes_with, read_path, read_path_with};

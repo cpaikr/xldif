@@ -198,6 +198,22 @@ fn reading_failures_have_stable_codes() {
 }
 
 #[test]
+fn cells_text_escapes_and_always_prints_a_document() {
+    let work = Work::new();
+    let rows = r#"<row r="1"><c r="A1" t="str"><f>LET(x,1,
+x)</f><v>a\b</v></c><c r="B1" t="s"><v>9</v></c></row>"#;
+    let book = work.file("odd.xlsx", &xldif_fixtures::raw::RawBook::new().sheet("S", rows).sheet("E", "").build());
+    let run = xldif(["cells", s(&book), "--sheet", "S", "--format", "text"]);
+    assert_eq!(run.code, 0);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines[0], r"A1	text	a\\b	=LET(x,1,\nx)");
+    assert!(lines.iter().any(|l| l.starts_with("warning\tunreadable_value")), "{}", run.stdout);
+    let empty = xldif(["cells", s(&book), "--sheet", "E", "--format", "text"]);
+    // Workbook warnings follow, whichever sheet is listed.
+    assert!(empty.stdout.starts_with("(no cells)\nwarning\tunreadable_value"), "{}", empty.stdout);
+}
+
+#[test]
 fn missing_arguments_hint_at_the_command_help() {
     let run = xldif(["cells", "book.xlsx"]);
     assert_eq!(run.code, 2);

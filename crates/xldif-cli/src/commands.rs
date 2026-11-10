@@ -50,7 +50,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
             let warnings: Vec<Warning> = wb.warnings.iter().cloned().map(Warning::from).collect();
             Ok(match format {
                 Format::Json => Output::Json { result: json(&listed), warnings },
-                Format::Text => Output::Text(cells_text(&listed)),
+                Format::Text => Output::Text(cells_text(&listed, &warnings)),
             })
         }
     }
@@ -90,23 +90,35 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
     out
 }
 
-fn cells_text(c: &Cells) -> String {
+/// One line per cell: text is escaped so tabs, line breaks, and
+/// backslashes inside values and formulas cannot split or blur a line.
+fn escape(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r")
+}
+
+fn cells_text(c: &Cells, warnings: &[Warning]) -> String {
     let mut out = String::new();
     for cell in &c.cells {
         let value = match &cell.value {
             None => String::new(),
             Some(JsonValue::Number(n)) => n.to_string(),
-            Some(JsonValue::Text(t)) => t.replace('\t', "\\t").replace('\n', "\\n").replace('\r', "\\r"),
+            Some(JsonValue::Text(t)) => escape(t),
             Some(JsonValue::Bool(b)) => b.to_string(),
         };
         let _ = write!(out, "{}\t{}\t{value}", cell.cell, cell.kind);
         if let Some(f) = &cell.formula {
-            let _ = write!(out, "\t={f}");
+            let _ = write!(out, "\t={}", escape(f));
         }
         out.push('\n');
     }
+    if c.cells.is_empty() && c.omitted == 0 {
+        out.push_str("(no cells)\n");
+    }
     if c.omitted > 0 {
         let _ = writeln!(out, "... {} more cells (raise --limit, or 0 for all)", c.omitted);
+    }
+    for w in warnings {
+        let _ = writeln!(out, "warning\t{}\t{}", w.code, w.message);
     }
     out
 }

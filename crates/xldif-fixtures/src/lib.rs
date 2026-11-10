@@ -54,7 +54,9 @@ pub fn edge_cases() -> Vec<u8> {
             r#"<row r="1"><c r="A1"><v>1</v></c><c r="B1"><f t="shared" ref="B1:B3" si="0">A1*2</f><v>2</v></c></row>
                <row r="2"><c r="A2"><v>2</v></c><c r="B2"><f t="shared" si="0"/><v>4</v></c></row>
                <row r="3"><c r="A3"><v>3</v></c><c r="B3"><f t="shared" si="0"/><v>6</v></c></row>
-               <row r="5"><c r="A5"><f>SUM(A1:A3)</f><v>6</v></c></row>"#,
+               <row r="5"><c r="A5"><f>SUM(A1:A3)</f><v>6</v></c></row>
+               <row r="7"><c r="A7"><f t="array" ref="A7:A8">A1:A2*10</f><v>10</v></c></row>
+               <row r="8"><c r="A8"><v>20</v></c></row>"#,
         )
         .build()
 }

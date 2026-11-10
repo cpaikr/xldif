@@ -166,7 +166,8 @@ pub fn cells(sheet: &Sheet, range: Option<Range>, limit: Option<usize>) -> Cells
         let value = match &cell.value {
             Value::Empty => None,
             Value::Number(n) => Some(JsonValue::Number(*n)),
-            Value::Text(t) | Value::Error(t) => Some(JsonValue::Text(t.clone())),
+            Value::Text(t) => Some(JsonValue::Text(t.to_string())),
+            Value::Error(t) => Some(JsonValue::Text(t.clone())),
             Value::Bool(b) => Some(JsonValue::Bool(*b)),
         };
         let formula = cell.formula.as_ref();

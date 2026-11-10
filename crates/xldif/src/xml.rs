@@ -154,6 +154,46 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// The text inside `wanted` elements up to the end of the element just
+    /// started, skipping any element named in `skip` with everything inside
+    /// it. Text outside `wanted` (indentation between elements) is dropped.
+    pub fn text_of(&mut self, wanted: &str, skip: &[&str]) -> Result<String, Error> {
+        let mut out = String::new();
+        let mut depth = 1usize;
+        let mut skipping: Option<usize> = None;
+        let mut inside: Option<usize> = None;
+        loop {
+            match self.next()? {
+                Event::Start(e) => {
+                    depth += 1;
+                    if skipping.is_none() && skip.contains(&e.name.as_str()) {
+                        skipping = Some(depth);
+                    } else if skipping.is_none() && inside.is_none() && e.name == wanted {
+                        inside = Some(depth);
+                    }
+                }
+                Event::End(_) => {
+                    if skipping == Some(depth) {
+                        skipping = None;
+                    }
+                    if inside == Some(depth) {
+                        inside = None;
+                    }
+                    depth -= 1;
+                    if depth == 0 {
+                        return Ok(out);
+                    }
+                }
+                Event::Text(t) => {
+                    if skipping.is_none() && inside.is_some() {
+                        out.push_str(&t);
+                    }
+                }
+                Event::Eof => return Err(self.error("unexpected end of part")),
+            }
+        }
+    }
+
     /// Skips the rest of the element just started.
     pub fn skip_element(&mut self) -> Result<(), Error> {
         let mut depth = 1usize;
@@ -242,6 +282,14 @@ mod tests {
         let mut p = Parser::new("<si><r><t>a</t></r><rPh><t>b</t></rPh><t>c</t></si>", "test.xml");
         p.next().unwrap();
         assert_eq!(p.text_until_end(&["rPh"]).unwrap(), "ac");
+    }
+
+    #[test]
+    fn text_of_keeps_only_wanted_elements() {
+        let xml = "<si>\n  <r>\n    <t>rich </t>\n  </r>\n  <r><t>text</t></r>\n  <rPh><t>yomi</t></rPh>\n</si>";
+        let mut p = Parser::new(xml, "test.xml");
+        p.next().unwrap();
+        assert_eq!(p.text_of("t", &["rPh"]).unwrap(), "rich text");
     }
 
     #[test]
