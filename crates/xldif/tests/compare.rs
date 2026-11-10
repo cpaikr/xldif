@@ -378,10 +378,11 @@ fn invoice_book(due: &[Option<f64>], amounts: bool) -> Vec<u8> {
 fn date_records_do_not_key_their_column() {
     // Every due date moves a year and an amount column is inserted: the
     // due column still pairs, so its cells compare as value changes. Also
-    // when the dates sit among other entries ("on request").
-    for mixed in [false, true] {
-        let base: Vec<Option<f64>> =
-            (0..12).map(|k| (!(mixed && k % 2 == 1)).then_some(45_300.0 + f64::from(k))).collect();
+    // when the dates sit among other entries ("on request"), and when the
+    // column holds a single date among them.
+    let shapes: [fn(u32) -> bool; 3] = [|_| true, |k| k % 2 == 0, |k| k == 0];
+    for (mixed, shape) in shapes.into_iter().enumerate() {
+        let base: Vec<Option<f64>> = (0..12).map(|k| shape(k).then_some(45_300.0 + f64::from(k))).collect();
         let other: Vec<Option<f64>> = base.iter().map(|d| d.map(|d| d + 366.0)).collect();
         let (b, o) = (read_bytes(invoice_book(&base, false)).unwrap(), read_bytes(invoice_book(&other, true)).unwrap());
         let c = compare("a", &b, "b", &o, CompareOptions::default());

@@ -710,16 +710,17 @@ impl<'a> Grid<'a> {
         let headers = cols
             .iter()
             .map(|(col, cells)| {
-                // A date heads a period column: the column's only date, with
-                // records below it. Where dates are the records (due dates,
-                // or dates among other entries) they must not key the column.
+                // A date heads a period column: the column's only date, over
+                // figures. Where dates are the records (due dates, or dates
+                // among other entries) they must not key the column.
                 let one_date = cells.iter().filter(|(_, c)| date(c).is_some()).take(2).count() == 1;
+                let figure = |c: &Cell| matches!(c.value, Value::Number(_)) && date(c).is_none();
                 let texts = cells
                     .iter()
                     .enumerate()
                     .filter(|(_, (r, _))| top.contains(r))
                     .filter_map(|(i, (_, c))| match date(c) {
-                        Some(d) => (one_date && i + 1 < cells.len()).then_some(d),
+                        Some(d) => (one_date && cells.get(i + 1).is_some_and(|(_, next)| figure(next))).then_some(d),
                         None => header_text(c),
                     })
                     .collect();
