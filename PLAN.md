@@ -40,8 +40,9 @@ Status:
   workflow accepts) decides the first version, sets it in `Cargo.toml`, and
   pushes its `v*` tag.
   Open items: table styles; `x14` extension-list validation and
-  conditional formatting; `.xlsb` input; row and column labels from
-  date-formatted header cells (labels still show the serial number).
+  conditional formatting; `.xlsb` input; row labels from date cells (a
+  row's label is still its leftmost text; date-formatted column headers
+  read as ISO dates and pair period columns).
 
 ## Decisions
 

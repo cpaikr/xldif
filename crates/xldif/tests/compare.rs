@@ -310,3 +310,40 @@ fn many_changes_and_repeated_labels_stay_fast() {
     assert_eq!(c.summary.rows_only_other, 1);
     assert_eq!(c.summary.value, n as usize);
 }
+
+/// Account rows under period columns headed by dates (serials, formatted).
+fn period_book(periods: &[f64], rows: &[(&str, &[f64])]) -> Vec<u8> {
+    use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet().set_name("S").unwrap();
+    let date = Format::new().set_num_format("yyyy-mm-dd");
+    sheet.write_string(0, 0, "Account").unwrap();
+    for (c, p) in (1u16..).zip(periods) {
+        sheet.write_number_with_format(0, c, *p, &date).unwrap();
+    }
+    for (r, (label, values)) in (1u32..).zip(rows) {
+        sheet.write_string(r, 0, *label).unwrap();
+        for (c, v) in (1u16..).zip(*values) {
+            sheet.write_number(r, c, *v).unwrap();
+        }
+    }
+    book.save_to_buffer().unwrap()
+}
+
+#[test]
+fn date_headers_label_and_pair_period_columns() {
+    // Periods roll forward: 2025 is added in front, 2023 drops off, and the
+    // 2024 figures are restated.
+    let (d23, d24, d25) = (45_291.0, 45_657.0, 46_022.0);
+    let base = period_book(&[d24, d23], &[("Cash", &[100.0, 90.0]), ("Receivables", &[200.0, 180.0])]);
+    let other = period_book(&[d25, d24], &[("Cash", &[120.0, 105.0]), ("Receivables", &[230.0, 200.0])]);
+    let (b, o) = (read_bytes(base).unwrap(), read_bytes(other).unwrap());
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    let s = &c.sheets[0];
+    let columns: Vec<String> = s.changes.iter().filter(|c| c.kind == Kind::Column).map(describe).collect();
+    assert_eq!(columns.len(), 2, "one period added, one dropped: {:?}", brief(s));
+    let restated: Vec<&Change> = s.changes.iter().filter(|c| c.kind == Kind::Value).collect();
+    assert_eq!(restated.len(), 1, "{:?}", brief(s));
+    let labels = restated[0].labels.as_ref().unwrap();
+    assert_eq!((labels.row.as_deref(), labels.column.as_deref()), (Some("Cash"), Some("2024-12-31")));
+}
