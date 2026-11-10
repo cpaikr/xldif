@@ -497,7 +497,6 @@ const SCRIPT: &str = r#"
   var info=document.getElementById('info'), counter=document.getElementById('at');
   var sheets=[].slice.call(document.querySelectorAll('section.sheet')), links=[].slice.call(document.querySelectorAll('#toc a'));
   var current=0, stops=[], at=-1;
-  var GRID=['value','formula','format','row'];
   if(window.innerWidth<900) body.classList.add('notoc');
   function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
   function val(l){ if(!l) return ''; if(l.formula!==undefined) return '='+l.formula; if(l.value!==undefined) return typeof l.value==='string'?l.value:String(l.value); return l.text||''; }
@@ -521,10 +520,13 @@ const SCRIPT: &str = r#"
   }
   function line(c,i){ return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'; }
   function objects(s){
-    var sheet=data.sheets[s], sec=sheets[s], all=sec&&sec.querySelector('[data-nogrid]'), rest=[];
-    (sheet?sheet.changes:[]).forEach(function(c,i){ if(all||GRID.indexOf(c.kind)<0) rest.push(i); });
+    // Every change the grid does not mark (objects, formatting on rows with
+    // no values, changes too large to mark) is listed here.
+    var sheet=data.sheets[s], sec=sheets[s], all=sec&&sec.querySelector('[data-nogrid]'), rest=[], marked={};
+    if(sec) [].forEach.call(sec.querySelectorAll('[data-c]'),function(el){ el.getAttribute('data-c').split(' ').forEach(function(i){ marked[i]=1; }); });
+    (sheet?sheet.changes:[]).forEach(function(c,i){ if(all||!marked[i]) rest.push(i); });
     var h='';
-    if(rest.length) h+='<h3>'+(all?'Changes on this sheet':'Other changes on this sheet')+'</h3><table class="cl">'+rest.map(function(i){return line(sheet.changes[i],i)}).join('')+'</table>';
+    if(rest.length) h+='<h3>'+(all?'Changes on this sheet':'Changes not marked in the grid')+'</h3><table class="cl">'+rest.map(function(i){return line(sheet.changes[i],i)}).join('')+'</table>';
     if(data.objects.length) h+='<h3>Workbook</h3><table class="cl">'+data.objects.map(function(c){
       var detail=(c.properties||[]).map(function(p){return p.name+': '+p.base+' → '+p.other}).join('; ')||val(c.other)||val(c.base);
       return '<tr><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(c.id)+'</td><td>'+esc(detail)+'</td></tr>'}).join('')+'</table>';

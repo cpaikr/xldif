@@ -810,6 +810,21 @@ mod tests {
     }
 
     #[test]
+    fn a_moved_row_at_a_range_edge_leaves_the_range() {
+        // Base rows 2..=6 summed; row 2 moved below the total (to 9); rows 3..=6 move up one.
+        let pairs = vec![(1, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)];
+        let map = SheetMap {
+            renamed_to: None,
+            rows: AxisMap::new(pairs, vec![(2, 9)], vec![], vec![], 1_048_576),
+            cols: AxisMap::identity(16_384),
+        };
+        // The corner skips the moved row instead of following it to row 9.
+        assert_eq!(render(&remap(&tokenize("SUM(B2:B6)"), &map, |_| None)), "SUM(B2:B5)");
+        // A single reference to the moved row follows it.
+        assert_eq!(render(&remap(&tokenize("B2"), &map, |_| None)), "B9");
+    }
+
+    #[test]
     fn blank_rows_follow_the_gap_they_sit_in() {
         // Base rows 1..=4 content, 5 blank, 6 content; other inserts a row at 5.
         let map = AxisMap::new(vec![(1, 1), (2, 2), (3, 3), (4, 4), (6, 7)], vec![], vec![], vec![5], 100);
