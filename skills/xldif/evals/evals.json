@@ -1,0 +1,30 @@
+{
+  "skill_name": "xldif",
+  "setup": "cargo run -p xldif-fixtures --example write_demo -- demo  (writes demo/demo-v1.xlsx and demo/demo-v2.xlsx, every value invented)",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "demo/demo-v1.xlsx 랑 demo/demo-v2.xlsx 뭐가 바뀌었는지 정리해 줘.",
+      "hard_because": "A cell-by-cell diff would flag every row below the inserted loan and the moved Cash row; the renamed Notes sheet and the formula replaced by a typed value are easy to miss.",
+      "expected_output": "Runs xldif compare (text or JSON), reports: Trade receivables 2025 3,400 → 3,650 (+250); a Short-term loans row inserted; Cash moved; Total assets 2025 7,150 → 7,900; the 2024 total's formula =SUM(C2:C6) replaced by a typed value (formula onlyBase); the Notes sheet renamed to Notes 2025 whose formula still reads 'Balance sheet'!B5 although Excel would have adjusted it to B6; the bold total and the edited review note as minor. Names base and other, quotes figures from the tool, mentions the recalculate-on-open warning."
+    },
+    {
+      "id": 2,
+      "prompt": "Which formulas changed between demo/demo-v1.xlsx and demo/demo-v2.xlsx, and is any of them a problem?",
+      "hard_because": "The total's SUM range grew only because of the inserted row (an adjustment, not a change), while two real problems remain: a formula replaced by a hard-coded value and a cross-sheet reference that no longer points at the same line.",
+      "expected_output": "Uses compare --kind formula; explains that SUM(B2:B6) → SUM(B2:B7) is Excel's adjustment (counted in formulasAdjusted, not listed); flags C8 (prior-year total) now typed instead of a formula, and Notes 2025!A3 still reading B5 where expected is B6, i.e. it now reads Cash instead of Prepaid expenses."
+    },
+    {
+      "id": 3,
+      "prompt": "Make a report my manager can open to review the differences between demo/demo-v1.xlsx and demo/demo-v2.xlsx.",
+      "hard_because": "The deliverable is the HTML report written to a file, not a pasted diff; it must not overwrite either workbook.",
+      "expected_output": "Runs xldif compare demo/demo-v1.xlsx demo/demo-v2.xlsx --format html -o <path>.html (beside the workbooks or where asked), reports the path and the headline counts from the summary envelope, and does not upload the workbooks or the report."
+    },
+    {
+      "id": 4,
+      "prompt": "demo-v2.xlsx 구조만 알려줘. 셀 내용은 말하지 말고.",
+      "hard_because": "Confidential content must not be echoed.",
+      "expected_output": "Uses xldif inspect and reports sheets, visibility, used ranges, cell and formula counts, and calculation warnings without quoting cell contents."
+    }
+  ]
+}

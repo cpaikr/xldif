@@ -1,0 +1,72 @@
+name: Release
+
+# Publishing is deliberate: a maintainer pushes a `v*` tag whose version
+# matches Cargo.toml. Ordinary work never pushes tags.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor == 'sjunepark'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            exe: xldif.exe
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            exe: xldif
+          - os: macos-14
+            target: aarch64-apple-darwin
+            exe: xldif
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Set up Rust 1.88
+        run: rustup toolchain install 1.88.0 --profile minimal --target ${{ matrix.target }}
+      - name: Tag matches the workspace version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          test "v$version" = "$GITHUB_REF_NAME"
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p xldif-cli
+      - name: Smoke test
+        shell: bash
+        run: ./target/${{ matrix.target }}/release/${{ matrix.exe }} --version
+      - name: Package
+        shell: bash
+        run: |
+          name=xldif-${GITHUB_REF_NAME}-${{ matrix.target }}
+          mkdir "$name"
+          cp target/${{ matrix.target }}/release/${{ matrix.exe }} README.md LICENSE.md "$name"/
+          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.target }}
+          path: xldif-*.*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes xldif-*.*

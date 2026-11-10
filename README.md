@@ -11,7 +11,8 @@ format changes; inserted, deleted, and moved rows, columns, and sheets;
 row and column layout; and merges, comments, data validation, conditional
 formatting, hyperlinks, sheet visibility, defined names, and the theme.
 `--format html -o report.html` writes a self-contained side-by-side
-report for people. The agent skill and releases come next. See
+report for people. The [`xldif` agent skill](skills/xldif/SKILL.md) teaches
+agents to drive the CLI. See
 [PLAN.md](PLAN.md).
 
 ## Commands
@@ -40,9 +41,15 @@ All accept `--format text`. Run `xldif <command> --help` for details.
 | [crates/xldif](crates/xldif/) | The library: reader, alignment, diff, and reports |
 | [crates/xldif-cli](crates/xldif-cli/) | The `xldif` executable |
 | [crates/xldif-fixtures](crates/xldif-fixtures/) | Synthetic test workbooks |
+| [skills/xldif](skills/xldif/SKILL.md) | The agent skill: routing, [comparing](skills/xldif/references/comparing.md), [installation](skills/xldif/references/installation.md) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Boundaries, invariants, and the process contract |
 | [PLAN.md](PLAN.md) | Design decisions and milestones |
 | `fixtures/private/` | Git-ignored real workbooks for local checks only |
+
+## Installing
+
+Download a release archive (once one is published) or build from source;
+see [installation](skills/xldif/references/installation.md).
 
 ## Building
 
