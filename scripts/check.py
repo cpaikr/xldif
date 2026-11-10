@@ -2,7 +2,10 @@
 """Repository checks: skill package rules, Rust format/lint/tests, and a CLI
 smoke run of the built executable.
 
-Usage: python scripts/check.py
+Usage: python scripts/check.py [--excel]
+
+With Excel, pywin32, and Windows, display text is also checked against
+Excel on a synthetic probe; --excel adds the private corpus (slower).
 
 Standard library only, except that the reader parity check runs
 scripts/parity.py, which needs openpyxl. Output never names private
@@ -215,6 +218,33 @@ def compare_smoke() -> None:
               f"{asymmetric} not mirrored when swapped)")
 
 
+def display_parity(corpus: bool) -> None:
+    """Display text agrees with Excel's own on a synthetic probe of number
+    formats, and with --excel on the private corpus (counts only). Needs
+    Windows, Excel, and pywin32; skipped with a note when they are absent."""
+    probe = "import win32com.client as w; e = w.DispatchEx('Excel.Application'); e.Quit()"
+    if sys.platform != "win32" or subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True).returncode:
+        print("skip display parity: needs Windows, Excel, and pywin32")
+        return
+    proc = subprocess.run(["cargo", "build", "-q", "--locked", "-p", "xldif", "--example", "shown"], cwd=ROOT)
+    if proc.returncode != 0:
+        fail("display parity: building the shown example failed")
+        return
+    shown = str(TARGET / "debug" / "examples" / "shown.exe")
+    script = str(ROOT / "scripts" / "display_parity.py")
+    runs = [("probe", ["--probe", str(TARGET / "xldif-display-probe.xlsx"), shown])]
+    private = [str(p) for p in private_books()]
+    if corpus and private:
+        runs.append((f"private corpus ({len(private)} workbooks)", [shown, *private]))
+    for label, args in runs:
+        proc = subprocess.run([sys.executable, "-I", script, *args], capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode != 0:
+            print(proc.stdout if label == "probe" else "")
+            fail(f"display parity: {label}")
+        else:
+            print(f"ok   display parity {label}")
+
+
 def main() -> int:
     if SKILLS.is_dir():
         for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
@@ -223,6 +253,7 @@ def main() -> int:
     cli_smoke()
     parity()
     compare_smoke()
+    display_parity(corpus="--excel" in sys.argv[1:])
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1

@@ -30,6 +30,8 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     forms for folding;
   - [styles.rs](crates/xldif/src/styles.rs): cell formats from `styles.xml`,
     resolved into comparable properties with symbolic colors;
+  - [numfmt.rs](crates/xldif/src/numfmt.rs): number format codes rendered
+    as the text Excel shows, and date serials as ISO dates;
   - [sheet_objects.rs](crates/xldif/src/sheet_objects.rs): row and column
     records, merges, comments, validation, conditional formats, hyperlinks;
   - [diff_objects.rs](crates/xldif/src/diff_objects.rs): formats, layout, and
@@ -105,8 +107,12 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
   alignment case: inserted, deleted, and moved rows; an inserted column with
   inserted rows; spacer rows; renumbered labels; renamed and moved sheets;
   swap symmetry.
+- [`scripts/display_parity.py`](scripts/display_parity.py) compares display
+  text with Excel's own (`Range.Text`, through COM on Windows) on a
+  synthetic probe of format codes, and on given workbooks with counts only.
 - [`scripts/check.py`](scripts/check.py) runs fmt, clippy, tests, a CLI smoke
   run, parity over the public fixtures and, when present, the private corpus,
   and a corpus compare smoke run: every workbook against itself must show no
   changes, and consecutive versions must compare, counting pairs that do not
-  mirror when swapped (counts only).
+  mirror when swapped (counts only). Where Excel is installed it also runs
+  the display probe; `--excel` adds the private corpus.

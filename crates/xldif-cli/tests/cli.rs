@@ -372,3 +372,50 @@ fn html_grids_follow_the_alignment_whatever_is_listed() {
         .collect();
     assert!(leftovers.is_empty(), "temporary files left behind");
 }
+
+/// A sheet with a formatted amount, a date, and a plain number in row 2,
+/// under labels in row 1.
+fn formatted_book(amount: f64, date: f64) -> Vec<u8> {
+    use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet().set_name("S").unwrap();
+    for (col, label) in ["Amount", "Date", "Plain"].into_iter().enumerate() {
+        sheet.write_string(0, u16::try_from(col).unwrap(), label).unwrap();
+    }
+    sheet.write_number_with_format(1, 0, amount, &Format::new().set_num_format("#,##0.00")).unwrap();
+    sheet.write_number_with_format(1, 1, date, &Format::new().set_num_format("yyyy-mm-dd")).unwrap();
+    // A format that does not change how 7 reads.
+    sheet.write_number_with_format(1, 2, 7.0, &Format::new().set_num_format("0")).unwrap();
+    book.save_to_buffer().unwrap()
+}
+
+#[test]
+fn cells_and_changes_carry_display_text_and_iso_dates() {
+    let work = Work::new();
+    let base = work.file("base.xlsx", &formatted_book(1234.5, 45_292.0));
+    let other = work.file("other.xlsx", &formatted_book(1300.0, 45_293.0));
+    let env = ok(&xldif(["cells", s(&base), "--sheet", "S", "--range", "A2:C2"]), "cells");
+    let cells = env["result"]["cells"].as_array().unwrap();
+    assert_eq!((cells[0]["value"].clone(), cells[0]["display"].clone()), (1234.5.into(), "1,234.50".into()));
+    assert!(cells[0].get("date").is_none());
+    assert_eq!((cells[1]["display"].clone(), cells[1]["date"].clone()), ("2024-01-01".into(), "2024-01-01".into()));
+    assert!(cells[2].get("display").is_none() && cells[2].get("date").is_none(), "7 reads as 7");
+    let text = xldif(["cells", s(&base), "--sheet", "S", "--range", "A2", "--format", "text"]);
+    assert_eq!(text.stdout, "A2\tnumber\t1234.5 [1,234.50]\n");
+
+    let env = ok(&xldif(["compare", s(&base), s(&other)]), "compare");
+    let change = &env["result"]["sheets"][0]["changes"][1];
+    assert_eq!(change["kind"], "value");
+    assert_eq!(
+        (change["base"]["date"].clone(), change["other"]["date"].clone()),
+        ("2024-01-01".into(), "2024-01-02".into())
+    );
+    let text = xldif(["compare", s(&base), s(&other), "--format", "text"]);
+    assert!(text.stdout.contains("45292 [2024-01-01] → 45293 [2024-01-02] (+1)"), "{}", text.stdout);
+    assert!(text.stdout.contains("1234.5 [1,234.50] → 1300 [1,300.00] (+65.5)"), "{}", text.stdout);
+
+    let report = work.0.join("report.html");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.contains(">2024-01-02<") && html.contains(">1,300.00<"), "the grid shows display text");
+}

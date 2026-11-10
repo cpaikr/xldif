@@ -138,7 +138,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 .transpose()?;
             let wb = xldif::read_path(&book)?;
             let found = views::find_sheet(&wb, &sheet)?;
-            let listed = views::cells(found, range, (limit > 0).then_some(limit));
+            let listed = views::cells(&wb, found, range, (limit > 0).then_some(limit));
             let warnings: Vec<Warning> = wb.warnings.iter().cloned().map(Warning::from).collect();
             Ok(match format {
                 Format::Json => Output::Json { result: json(&listed), warnings },
@@ -262,6 +262,9 @@ fn cells_text(c: &Cells, warnings: &[Warning]) -> String {
             Some(JsonValue::Bool(b)) => b.to_string(),
         };
         let _ = write!(out, "{}\t{}\t{value}", cell.cell, cell.kind);
+        if let Some(shown) = &cell.display {
+            let _ = write!(out, " [{}]", escape(shown));
+        }
         if let Some(f) = &cell.formula {
             let _ = write!(out, "\t={}", escape(f));
         }
@@ -287,6 +290,15 @@ fn value_text(v: Option<&JsonValue>) -> String {
     }
 }
 
+/// A value with what the cell shows, when that differs: `45382 [31-Mar-24]`.
+fn located_value(l: Option<&Location>) -> String {
+    let value = value_text(l.and_then(|l| l.value.as_ref()));
+    match l.and_then(|l| l.display.as_deref()) {
+        Some(shown) => format!("{value} [{}]", escape(shown)),
+        None => value,
+    }
+}
+
 fn reference(l: Option<&Location>) -> String {
     l.and_then(|l| {
         l.range.clone().or_else(|| l.cell.clone()).or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone())
@@ -303,12 +315,7 @@ fn change_text(c: &Change) -> String {
         reference(c.other.as_ref())
     );
     if c.kind == diff::Kind::Value {
-        let _ = write!(
-            line,
-            "\t{} → {}",
-            value_text(c.base.as_ref().and_then(|l| l.value.as_ref())),
-            value_text(c.other.as_ref().and_then(|l| l.value.as_ref()))
-        );
+        let _ = write!(line, "\t{} → {}", located_value(c.base.as_ref()), located_value(c.other.as_ref()));
         if let Some(d) = c.delta {
             let _ = write!(line, " ({d:+})");
         }

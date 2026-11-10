@@ -13,6 +13,7 @@ use std::fmt::Write as _;
 use crate::cellref::{Range, cell_name, col_name};
 use crate::diff::{Change, Kind, Listing, SheetComparison, Status};
 use crate::model::{Cell, Sheet, Value, Workbook};
+use crate::numfmt::Formats;
 
 /// Rows with a change, plus this many neighbours, stay visible in
 /// "changes only" view.
@@ -49,33 +50,6 @@ struct Slot {
     base: Option<u32>,
     other: Option<u32>,
     status: Status,
-}
-
-/// A cell's text as shown: numbers with digit grouping when they are whole,
-/// booleans and errors as Excel spells them.
-fn shown(v: &Value) -> String {
-    match v {
-        Value::Empty => String::new(),
-        Value::Number(n) if n.fract() == 0.0 && n.abs() < 1e15 => group(*n),
-        Value::Number(n) => format!("{n}"),
-        Value::Text(t) => t.to_string(),
-        Value::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_owned(),
-        Value::Error(e) => e.clone(),
-    }
-}
-
-fn group(n: f64) -> String {
-    // Callers pass whole numbers below 1e15, which a u64 holds exactly.
-    #[allow(clippy::cast_sign_loss)]
-    let digits = format!("{}", n.abs() as u64);
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    if n < 0.0 { format!("-{out}") } else { out }
 }
 
 fn cell_value(sheet: &Sheet, row: u32, col: u32) -> Option<&crate::model::Cell> {
@@ -199,7 +173,16 @@ fn unpaired(content: &[u32], runs: &[[u32; 3]], moves: &[[u32; 3]], base_side: b
 }
 
 /// One sheet pair's two grids and its per-cell change index.
-fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, other: Option<&Sheet>, index: usize) {
+/// `formats` are the base and other workbooks' number formats: cells show
+/// their text as Excel would.
+fn render_sheet(
+    out: &mut String,
+    s: &SheetComparison,
+    base: Option<&Sheet>,
+    other: Option<&Sheet>,
+    formats: [&Formats; 2],
+    index: usize,
+) {
     let Some(al) = &s.alignment else {
         let what =
             if s.status == Status::OnlyBase { "only in the base workbook" } else { "only in the other workbook" };
@@ -318,9 +301,12 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
                 .enumerate()
                 .filter(|(i, _)| !trimmed || near[*i])
                 .flat_map(|(_, r)| {
-                    [(base, r.base, c.base), (other, r.other, c.other)].into_iter().filter_map(|(sheet, row, col)| {
-                        cell_value(sheet, row?, col?).map(|cell| shown(&cell.value).chars().count())
-                    })
+                    [(base, 0, r.base, c.base), (other, 1, r.other, c.other)].into_iter().filter_map(
+                        |(sheet, side, row, col)| {
+                            cell_value(sheet, row?, col?)
+                                .map(|cell| formats[side].shown(cell.style, &cell.value).chars().count())
+                        },
+                    )
                 })
                 .max()
                 .unwrap_or(0);
@@ -373,7 +359,7 @@ fn render_sheet(out: &mut String, s: &SheetComparison, base: Option<&Sheet>, oth
                     continue;
                 };
                 let cell = cell_value(sheet, row, col);
-                let text = cell.map(|c| shown(&c.value)).unwrap_or_default();
+                let text = cell.map(|c| formats[side].shown(c.style, &c.value)).unwrap_or_default();
                 let ids = on_cell[side].get(&(row, col));
                 let mut class = String::from(col_class(c).trim());
                 if let Some(ids) = ids {
@@ -685,10 +671,11 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook) -> String {
     let find = |book: &'_ Workbook, name: &Option<String>| -> Option<usize> {
         name.as_ref().and_then(|n| book.sheets.iter().position(|s| &s.name == n))
     };
+    let (fb, fo) = (Formats::new(&base.styles, base.date1904), Formats::new(&other.styles, other.date1904));
     for (i, sheet) in cmp.sheets.iter().enumerate() {
         let b = find(base, &sheet.base).map(|k| &base.sheets[k]);
         let o = find(other, &sheet.other).map(|k| &other.sheets[k]);
-        render_sheet(&mut out, sheet, b, o, i);
+        render_sheet(&mut out, sheet, b, o, [&fb, &fo], i);
     }
     out.push_str("<div id=\"info\"></div></div></div>");
     let data =

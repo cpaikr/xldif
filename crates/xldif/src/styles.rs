@@ -231,6 +231,30 @@ impl Styles {
         }
     }
 
+    /// The number format code of style index `s`, resolved like
+    /// [`Styles::format`] without building the whole format.
+    pub fn number_format(&self, s: u32) -> String {
+        let Some(xf) = self.xfs.get(s as usize).or_else(|| self.xfs.first()) else { return "General".to_owned() };
+        self.num_fmts
+            .iter()
+            .find(|(n, _)| *n == xf.num_fmt)
+            .map_or_else(|| builtin_number_format(xf.num_fmt), |(_, code)| code.clone())
+    }
+
+    /// The number format code to render style `s` with: as
+    /// [`Styles::number_format`], except that the built-in short date (14)
+    /// and date-time (22), whose look follows the system locale, are named
+    /// `builtin:<id>` so display does not show their ECMA-376 placeholder
+    /// codes (`mm-dd-yy`) as if Excel did.
+    pub fn display_number_format(&self, s: u32) -> String {
+        let Some(xf) = self.xfs.get(s as usize).or_else(|| self.xfs.first()) else { return "General".to_owned() };
+        let custom = self.num_fmts.iter().any(|(n, _)| *n == xf.num_fmt);
+        if !custom && matches!(xf.num_fmt, 14 | 22) {
+            return format!("builtin:{}", xf.num_fmt);
+        }
+        self.number_format(s)
+    }
+
     /// The description of differential format `id`, or a marker when the
     /// index is past the table.
     pub fn dxf(&self, id: usize) -> String {
