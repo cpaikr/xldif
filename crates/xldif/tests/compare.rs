@@ -387,8 +387,9 @@ fn date_records_do_not_key_their_column() {
     // A single date over numbers is shaped like a period column under a
     // caption; it pairs through the caption's label even when it keys the
     // column.
-    let shapes: [(fn(u32) -> bool, Option<f64>); 4] =
-        [(|_| true, None), (|k| k % 2 == 0, None), (|k| k == 0, None), (|k| k == 0, Some(42.0))];
+    // Which rows hold a date, and what the other rows hold.
+    type Shape = (fn(u32) -> bool, Option<f64>);
+    let shapes: [Shape; 4] = [(|_| true, None), (|k| k % 2 == 0, None), (|k| k == 0, None), (|k| k == 0, Some(42.0))];
     for (mixed, (shape, filler)) in shapes.into_iter().enumerate() {
         let base: Vec<Option<f64>> = (0..12).map(|k| shape(k).then_some(45_300.0 + f64::from(k))).collect();
         let other: Vec<Option<f64>> = base.iter().map(|d| d.map(|d| d + 366.0)).collect();
