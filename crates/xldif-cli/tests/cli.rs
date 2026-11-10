@@ -258,7 +258,7 @@ fn compare_reports_aligned_changes() {
 
     let text = xldif(["compare", s(&base), s(&other), "--format", "text", "--kind", "value"]);
     assert_eq!(text.code, 0);
-    assert!(text.stdout.contains("value\tChanged\tB3→B4\t100 → 105 (+5)\tTotal | 2025"), "{}", text.stdout);
+    assert!(text.stdout.contains("value\tchanged\tB3→B4\t100 → 105 (+5)\tTotal | 2025"), "{}", text.stdout);
     assert!(text.stdout.contains("1 more change(s) left out"), "{}", text.stdout);
 
     let same = ok(&xldif(["compare", s(&base), s(&base)]), "compare");

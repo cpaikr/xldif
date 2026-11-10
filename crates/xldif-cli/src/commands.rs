@@ -200,8 +200,13 @@ fn reference(l: Option<&Location>) -> String {
 }
 
 fn change_text(c: &Change) -> String {
-    let mut line =
-        format!("{}\t{:?}\t{}→{}", c.kind.as_str(), c.status, reference(c.base.as_ref()), reference(c.other.as_ref()));
+    let mut line = format!(
+        "{}\t{}\t{}→{}",
+        c.kind.as_str(),
+        c.status.as_str(),
+        reference(c.base.as_ref()),
+        reference(c.other.as_ref())
+    );
     if c.kind == diff::Kind::Value {
         let _ = write!(
             line,
@@ -249,7 +254,7 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
             (None, None) => String::new(),
         };
         let moved = if sheet.moved { ", moved" } else { "" };
-        let _ = writeln!(out, "\n[{name}] {:?}{moved}", sheet.status);
+        let _ = writeln!(out, "\n[{name}] {}{moved}", sheet.status.as_str());
         for c in &sheet.changes {
             let _ = writeln!(out, "{}", change_text(c));
         }

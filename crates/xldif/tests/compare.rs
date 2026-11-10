@@ -1,6 +1,6 @@
 //! Content-aligned comparison against synthetic workbooks: each alignment
 //! case in PLAN.md gives exactly the expected changes.
-#![allow(clippy::format_collect)]
+#![allow(clippy::format_collect, clippy::format_push_string)]
 
 use xldif::diff::{AlignMode, Change, CompareOptions, Comparison, Filter, Kind, SheetComparison, Status, compare};
 use xldif::read_bytes;
@@ -252,4 +252,61 @@ fn sparse_sheets_compare_in_time_proportional_to_cells() {
     let c = compare("a", &book, "b", &book, CompareOptions { align: AlignMode::Position, ..CompareOptions::default() });
     assert!(c.sheets[0].changes.is_empty());
     assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
+}
+
+#[test]
+fn column_labels_prefer_the_header_over_the_record_above() {
+    let base: Grid = &[&["Id", "Name"], &["1", "Alice"], &["2", "Bob"], &["3", "Carol"]];
+    let other: Grid = &[&["Id", "Name"], &["1", "Alice"], &["2", "Bob"], &["3", "Caroline"]];
+    let c = content(&[("S", base)], &[("S", other)]);
+    let change = &sheet(&c, "S").changes[0];
+    assert_eq!(change.labels.as_ref().unwrap().column.as_deref(), Some("Name"));
+}
+
+#[test]
+fn years_typed_as_text_are_headers() {
+    let rows = |amount: &str| {
+        format!(
+            r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Account</t></is></c><c r="B1" t="inlineStr"><is><t>2025</t></is></c></row>
+               <row r="2"><c r="A2" t="inlineStr"><is><t>Cash</t></is></c><c r="B2"><v>{amount}</v></c></row>"#
+        )
+    };
+    let (b, o) = (
+        read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", &rows("1")).build()).unwrap(),
+        read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", &rows("2")).build()).unwrap(),
+    );
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!(c.sheets[0].changes[0].labels.as_ref().unwrap().column.as_deref(), Some("2025"));
+}
+
+#[test]
+fn many_changes_and_repeated_labels_stay_fast() {
+    // Every value changes (labels are computed for each change), and labels
+    // repeat every 12 rows (run search must stay linear).
+    let n = 4000;
+    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let grid = |shift: u32, extra: bool| -> String {
+        let mut rows = String::from(r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Month</t></is></c></row>"#);
+        let mut r = 2;
+        if extra {
+            rows.push_str(&format!(r#"<row r="{r}"><c r="A{r}" t="inlineStr"><is><t>Opening</t></is></c></row>"#));
+            r += 1;
+        }
+        for i in 0..n {
+            let m = months[i as usize % 12];
+            rows.push_str(&format!(
+                r#"<row r="{r}"><c r="A{r}" t="inlineStr"><is><t>{m}</t></is></c><c r="B{r}"><v>{}</v></c></row>"#,
+                i + shift
+            ));
+            r += 1;
+        }
+        rows
+    };
+    let b = read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", &grid(0, false)).build()).unwrap();
+    let o = read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", &grid(1, true)).build()).unwrap();
+    let start = std::time::Instant::now();
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
+    assert_eq!(c.summary.rows_only_other, 1);
+    assert_eq!(c.summary.value, n as usize);
 }

@@ -50,6 +50,19 @@ pub enum Status {
     Moved,
 }
 
+impl Status {
+    /// The JSON spelling, for text views.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Same => "same",
+            Self::Changed => "changed",
+            Self::OnlyBase => "onlyBase",
+            Self::OnlyOther => "onlyOther",
+            Self::Moved => "moved",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Kind {
@@ -420,8 +433,11 @@ fn display_label(text: &str) -> String {
 /// A cell's text as a column header: text that is not a number, or a year
 /// stored as a number (period headers often are).
 fn header_text(cell: &Cell) -> Option<String> {
+    let year = |n: f64| n.fract() == 0.0 && (1900.0..=2100.0).contains(&n);
     match &cell.value {
-        Value::Number(n) if n.fract() == 0.0 && (1900.0..=2100.0).contains(n) => Some(format!("{n}")),
+        Value::Number(n) if year(*n) => Some(format!("{n}")),
+        // "2025" typed as text is a year too; "2,025" is an amount.
+        Value::Text(t) if !t.contains(',') && numeric_text(t).is_some_and(year) => Some(t.trim().to_owned()),
         _ => text_of(cell).filter(|t| numeric_text(t).is_none()).map(display_label),
     }
 }
@@ -433,6 +449,9 @@ fn text_of(cell: &Cell) -> Option<&str> {
     }
 }
 
+/// How many content rows at the top of a sheet may hold column headers.
+const HEADER_ROWS: usize = 10;
+
 /// Rows and columns of one sheet with content, for alignment.
 struct Grid<'a> {
     sheet: &'a Sheet,
@@ -440,6 +459,8 @@ struct Grid<'a> {
     rows: Vec<&'a Row>,
     /// Columns with content, in order, each with its content cells by row.
     cols: Vec<(u32, Vec<(u32, &'a Cell)>)>,
+    /// Each column's header: the first header text in the top content rows.
+    headers: HashMap<u32, String>,
 }
 
 impl<'a> Grid<'a> {
@@ -452,7 +473,15 @@ impl<'a> Grid<'a> {
                 by_col.entry(cell.col).or_default().push((row.index, cell));
             }
         }
-        Self { sheet, rows, cols: by_col.into_iter().collect() }
+        let cols: Vec<(u32, Vec<(u32, &Cell)>)> = by_col.into_iter().collect();
+        let top: HashSet<u32> = rows.iter().take(HEADER_ROWS).map(|r| r.index).collect();
+        let headers = cols
+            .iter()
+            .filter_map(|(col, cells)| {
+                cells.iter().filter(|(r, _)| top.contains(r)).find_map(|(_, c)| header_text(c)).map(|h| (*col, h))
+            })
+            .collect();
+        Self { sheet, rows, cols, headers }
     }
 
     /// The written cells of one row, in column order.
@@ -471,9 +500,14 @@ impl<'a> Grid<'a> {
         row.cells.iter().find_map(text_of)
     }
 
-    /// The nearest text cell above `row` in `col` that is not a number
-    /// written as text, within a few rows.
+    /// The column's header from the top rows; failing that, the nearest
+    /// text above `row` in `col` that is not a number written as text. The
+    /// header comes first because in a text column the nearest text above
+    /// is usually the previous record, not a heading.
     fn column_label(&self, row: u32, col: u32) -> Option<String> {
+        if let Some(header) = self.headers.get(&col) {
+            return Some(header.clone());
+        }
         let below = self.sheet.rows.partition_point(|r| r.index < row);
         self.sheet.rows[..below]
             .iter()
@@ -484,18 +518,10 @@ impl<'a> Grid<'a> {
                 text_of(cell).filter(|t| numeric_text(t).is_none())
             })
             .map(display_label)
-            .or_else(|| self.column_header(col))
-    }
-
-    /// The first text in the top rows of `col` that is not a number.
-    fn column_header(&self, col: u32) -> Option<String> {
-        let (_, cells) = &self.cols[self.cols.binary_search_by_key(&col, |(c, _)| *c).ok()?];
-        let top: HashSet<u32> = self.rows.iter().take(10).map(|r| r.index).collect();
-        cells.iter().filter(|(r, _)| top.contains(r)).find_map(|(_, c)| header_text(c))
     }
 
     fn column_items(&self) -> Vec<Item> {
-        let header_rows: HashSet<u32> = self.rows.iter().take(10).map(|r| r.index).collect();
+        let header_rows: HashSet<u32> = self.rows.iter().take(HEADER_ROWS).map(|r| r.index).collect();
         self.cols
             .iter()
             .map(|(_, cells)| {
@@ -739,17 +765,7 @@ fn compare_sheets(id: &str, b: &Sheet, o: &Sheet, options: CompareOptions) -> (A
             let (bn, on) = (cell_name(rb, cb), cell_name(ro, co));
             let row_label = label(&go, ro).or_else(|| label(&gb, rb));
             let base_row = label(&gb, rb).filter(|l| Some(l) != row_label.as_ref());
-            // The label cell itself needs no column label.
-            let is_label = go.cell(ro, co).is_some_and(|c| {
-                go.sheet
-                    .rows
-                    .binary_search_by_key(&ro, |r| r.index)
-                    .ok()
-                    .and_then(|i| Grid::row_label(&go.sheet.rows[i]))
-                    == text_of(c)
-                    && text_of(c).is_some()
-            });
-            let column = if is_label { None } else { go.column_label(ro, co).or_else(|| gb.column_label(rb, cb)) };
+            let column = go.column_label(ro, co).or_else(|| gb.column_label(rb, cb));
             changes.push(Change {
                 id: format!("{id}:value:{bn}:{on}"),
                 kind: Kind::Value,

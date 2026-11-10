@@ -181,7 +181,13 @@ def compare_smoke() -> None:
         by_series.setdefault(b.parent, []).append(b)
     pairs = [(s[i], s[i + 1]) for s in by_series.values() for i in range(len(s) - 1)]
     failed = asymmetric = 0
-    mirror = {"rowsOnlyBase": "rowsOnlyOther", "columnsOnlyBase": "columnsOnlyOther", "value": "value"}
+    mirror = {
+        "rowsOnlyBase": "rowsOnlyOther",
+        "columnsOnlyBase": "columnsOnlyOther",
+        "rowsMoved": "rowsMoved",
+        "columnsMoved": "columnsMoved",
+        "value": "value",
+    }
     for a, b in pairs:
         ab, ba = run(a, b), run(b, a)
         if ab is None or ba is None:

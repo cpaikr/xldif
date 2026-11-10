@@ -217,19 +217,28 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
 3. **Order: columns, then rows.** Column alignment uses values only, which
    an inserted row barely changes; row alignment then uses the column map,
    so an inserted column cannot break row matching.
-4. **Matching each axis:**
-   - Trim equal keys at both ends.
+4. **Matching each axis**, in three passes:
+   - First on whole content (label plus tokens), so unchanged rows anchor
+     even when labels repeat (a currency or entity column) or are absent
+     (a table of numbers); then on labels alone inside the gaps that leave,
+     for rows whose values changed; then by similarity.
+   - Each key pass trims equal keys at both ends.
    - Patience: keys unique on both sides anchor the region, keeping their
      longest in-order run, so one moved row cannot pull its neighbours out
-     of line.
+     of line. When several runs are longest, both orientations are tried
+     and the one that moves items least wins, so swapping the files mirrors
+     the result.
    - Where no key is unique, anchor on the rarest shared key (at most 64
      occurrences) with its longest run, and recurse.
    - In the gaps between anchors, pair items by similarity (bigram label
      likeness averaged with token Jaccard) with a weighted LCS, at least
      0.5, never crossing.
    - A leftover equal-sized run pairs by position for columns (headers often
-     change wholesale between periods) and for rows when every row keeps
-     its layout (a row whose label alone was edited is one value change).
+     change wholesale between periods), and for rows when every row keeps
+     its layout and shows some sign of being the same row (a shared value,
+     or labels at least 0.25 alike): a row whose label alone was edited is
+     one value change, while an unrelated row replacing another stays a
+     deletion and an insertion.
    - The planned explicit cost model was not needed: these thresholds and
      the layout rule gave clean results on the corpus. Revisit only if a
      real file shows a bad choice.
@@ -239,8 +248,8 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
    breaks by index, never by hash order. On the private corpus all 29
    workbooks compare clean against themselves and all 24 consecutive version
    pairs mirror exactly when swapped (`scripts/check.py`).
-7. **Bounds.** A gap larger than 4 million item pairs is paired by position
-   instead, with an `alignment_fallback` warning and `fellBack: true`.
+7. **Bounds.** A gap larger than 4 million item pairs, or 200 million token
+   comparisons, is paired by position instead, with an `alignment_fallback` warning and `fellBack: true`.
    `--align position` compares A1 with A1 throughout.
 8. **Objects follow the alignment (M3).** Merges, comments, data
    validation, conditional formatting ranges, and hyperlinks are mapped

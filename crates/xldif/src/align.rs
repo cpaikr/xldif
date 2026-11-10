@@ -29,6 +29,8 @@ pub const MIN_SIMILARITY: f64 = 0.5;
 const MAX_ANCHOR_OCCURRENCES: usize = 64;
 /// The largest gap (base items × other items) the similarity pass examines.
 pub const MAX_GAP_WORK: usize = 4_000_000;
+/// The most token comparisons the similarity pass spends on one gap.
+pub const MAX_GAP_TOKEN_WORK: usize = 200_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
@@ -67,31 +69,89 @@ impl Alignment {
 }
 
 pub fn align(base: &[Item], other: &[Item], options: Options) -> Alignment {
-    let mut out = Alignment { pairs: match_keys(base, other), ..Alignment::default() };
-    let anchors = out.pairs.clone();
-    let mut filled = Vec::new();
-    let (mut a, mut b) = (0, 0);
-    for &(i, j) in anchors.iter().chain(std::iter::once(&(base.len(), other.len()))) {
-        if i > a || j > b {
-            fill_gap(base, other, (a, i), (b, j), options, &mut filled, &mut out.fell_back);
-        }
-        (a, b) = (i + 1, j + 1);
+    // Pass 1: whole content (label and tokens). Rows that did not change at
+    // all anchor first, so repeated labels (a currency or entity column) and
+    // unlabelled tables still line up around an insertion.
+    let (cb, co) = (content_keys(base), content_keys(other));
+    let mut pairs = match_keys(&cb, &co, (0, base.len()), (0, other.len()));
+    // Pass 2: labels alone, inside the gaps pass 1 left, for rows whose
+    // values changed.
+    let (lb, lo) = (label_keys(base), label_keys(other));
+    let mut by_label = Vec::new();
+    for (a, b) in gaps(&pairs, base.len(), other.len()) {
+        by_label.extend(match_keys(&lb, &lo, a, b));
     }
-    out.pairs.extend(filled);
-    out.pairs.sort_unstable();
-    out.moves = find_moves(base, other, &out.pairs);
+    pairs.extend(by_label);
+    pairs.sort_unstable();
+    // Pass 3: similarity inside what is still unpaired.
+    let mut out = Alignment::default();
+    let mut filled = Vec::new();
+    for (a, b) in gaps(&pairs, base.len(), other.len()) {
+        fill_gap(base, other, a, b, options, &mut filled, &mut out.fell_back);
+    }
+    pairs.extend(filled);
+    pairs.sort_unstable();
+    out.moves = find_moves(base, other, &pairs);
+    out.pairs = pairs;
     out
 }
 
-/// Histogram matching on keys: trims equal ends, then anchors each region on
-/// its rarest shared key and recurses on both sides of the anchor.
-fn match_keys(base: &[Item], other: &[Item]) -> Vec<(usize, usize)> {
-    fn key(items: &[Item], i: usize) -> Option<&str> {
-        items[i].key.as_deref()
+/// The unpaired regions between ordered pairs: `((alo, ahi), (blo, bhi))`.
+fn gaps(pairs: &[(usize, usize)], n: usize, m: usize) -> Vec<((usize, usize), (usize, usize))> {
+    let mut out = Vec::new();
+    let (mut a, mut b) = (0, 0);
+    for &(i, j) in pairs.iter().chain(std::iter::once(&(n, m))) {
+        if i > a || j > b {
+            out.push(((a, i), (b, j)));
+        }
+        (a, b) = (i + 1, j + 1);
     }
-    let same = |i: usize, j: usize| key(base, i).is_some() && key(base, i) == key(other, j);
+    out
+}
+
+/// A deterministic 64-bit FNV-1a hash.
+fn fnv(parts: &[&[u8]]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in parts {
+        for &b in *part {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        h ^= 0xff;
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h
+}
+
+/// Each item's label and tokens together; `None` for an item with neither.
+fn content_keys(items: &[Item]) -> Vec<Option<u64>> {
+    items
+        .iter()
+        .map(|it| {
+            (it.key.is_some() || !it.tokens.is_empty()).then(|| {
+                let tokens: Vec<u8> = it.tokens.iter().flat_map(|t| t.to_le_bytes()).collect();
+                fnv(&[it.key.as_deref().unwrap_or("").as_bytes(), &[u8::from(it.key.is_some())], &tokens])
+            })
+        })
+        .collect()
+}
+
+fn label_keys(items: &[Item]) -> Vec<Option<u64>> {
+    items.iter().map(|it| it.key.as_deref().map(|k| fnv(&[k.as_bytes()]))).collect()
+}
+
+/// Histogram matching on keys within one region: trims equal ends, anchors
+/// on keys unique on both sides (patience), else on the rarest shared key
+/// with its longest run, and recurses on both sides of each anchor.
+fn match_keys(
+    a: &[Option<u64>],
+    b: &[Option<u64>],
+    (alo, ahi): (usize, usize),
+    (blo, bhi): (usize, usize),
+) -> Vec<(usize, usize)> {
+    let same = |i: usize, j: usize| a[i].is_some() && a[i] == b[j];
     let mut pairs = Vec::new();
-    let mut regions = vec![(0, base.len(), 0, other.len())];
+    let mut regions = vec![(alo, ahi, blo, bhi)];
     while let Some((mut alo, mut ahi, mut blo, mut bhi)) = regions.pop() {
         while alo < ahi && blo < bhi && same(alo, blo) {
             pairs.push((alo, blo));
@@ -106,45 +166,42 @@ fn match_keys(base: &[Item], other: &[Item]) -> Vec<(usize, usize)> {
         if alo == ahi || blo == bhi {
             continue;
         }
-        // Patience: keys unique on both sides anchor the region, keeping the
-        // longest run of them that stays in order, so one moved row cannot
-        // pull the rows around it out of line.
-        let anchors = patience_anchors(base, other, (alo, ahi), (blo, bhi));
+        let anchors = patience_anchors(a, b, (alo, ahi), (blo, bhi));
         if !anchors.is_empty() {
-            let (mut a, mut b) = (alo, blo);
+            let (mut x, mut y) = (alo, blo);
             for &(i, j) in &anchors {
-                regions.push((a, i, b, j));
+                regions.push((x, i, y, j));
                 pairs.push((i, j));
-                (a, b) = (i + 1, j + 1);
+                (x, y) = (i + 1, j + 1);
             }
-            regions.push((a, ahi, b, bhi));
+            regions.push((x, ahi, y, bhi));
             continue;
         }
         // Otherwise the rarest repeated key anchors, with its longest run.
-        let mut positions: HashMap<&str, Vec<usize>> = HashMap::new();
-        for i in alo..ahi {
-            if let Some(k) = key(base, i) {
-                positions.entry(k).or_default().push(i);
+        let mut positions: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, k) in a.iter().enumerate().take(ahi).skip(alo) {
+            if let Some(k) = k {
+                positions.entry(*k).or_default().push(i);
             }
         }
         // (occurrences, -run length, i, j): the rarest, then longest, then first.
         let mut best: Option<(usize, std::cmp::Reverse<usize>, usize, usize, usize)> = None;
         for j in blo..bhi {
-            let Some(found) = key(other, j).and_then(|k| positions.get(k)) else { continue };
+            let Some(found) = b[j].and_then(|k| positions.get(&k)) else { continue };
             if found.len() > MAX_ANCHOR_OCCURRENCES {
                 continue;
             }
             for &i in found {
-                let (mut s, mut t) = (i, j);
-                while s > alo && t > blo && same(s - 1, t - 1) {
-                    s -= 1;
-                    t -= 1;
+                // Measure each run once, from its start: a candidate inside a
+                // run would only re-measure it (quadratic on long runs).
+                if i > alo && j > blo && same(i - 1, j - 1) {
+                    continue;
                 }
                 let mut len = 0;
-                while s + len < ahi && t + len < bhi && same(s + len, t + len) {
+                while i + len < ahi && j + len < bhi && same(i + len, j + len) {
                     len += 1;
                 }
-                let candidate = (found.len(), std::cmp::Reverse(len), s, t, len);
+                let candidate = (found.len(), std::cmp::Reverse(len), i, j, len);
                 if best.is_none_or(|b| (candidate.0, candidate.1, candidate.2, candidate.3) < (b.0, b.1, b.2, b.3)) {
                     best = Some(candidate);
                 }
@@ -161,24 +218,27 @@ fn match_keys(base: &[Item], other: &[Item]) -> Vec<(usize, usize)> {
 }
 
 /// Pairs of items whose key occurs exactly once on each side of the region,
-/// reduced to the longest subsequence increasing on both sides.
+/// reduced to a longest subsequence increasing on both sides. When several
+/// subsequences are longest, the choice must not depend on which side is
+/// the base: both orientations are tried, and the one that moves items
+/// least (then the one with the smaller keys) wins.
 fn patience_anchors(
-    base: &[Item],
-    other: &[Item],
+    a: &[Option<u64>],
+    b: &[Option<u64>],
     (alo, ahi): (usize, usize),
     (blo, bhi): (usize, usize),
 ) -> Vec<(usize, usize)> {
     // key → (count in base, last base index, count in other, last other index)
-    let mut seen: HashMap<&str, (usize, usize, usize, usize)> = HashMap::new();
-    for (i, item) in base.iter().enumerate().take(ahi).skip(alo) {
-        if let Some(k) = item.key.as_deref() {
-            let e = seen.entry(k).or_default();
+    let mut seen: HashMap<u64, (usize, usize, usize, usize)> = HashMap::new();
+    for (i, k) in a.iter().enumerate().take(ahi).skip(alo) {
+        if let Some(k) = k {
+            let e = seen.entry(*k).or_default();
             e.0 += 1;
             e.1 = i;
         }
     }
-    for (j, item) in other.iter().enumerate().take(bhi).skip(blo) {
-        if let Some(k) = item.key.as_deref()
+    for (j, k) in b.iter().enumerate().take(bhi).skip(blo) {
+        if let Some(k) = k
             && let Some(e) = seen.get_mut(k)
         {
             e.2 += 1;
@@ -187,11 +247,30 @@ fn patience_anchors(
     }
     let mut unique: Vec<(usize, usize)> =
         seen.into_values().filter(|e| e.0 == 1 && e.2 == 1).map(|e| (e.1, e.3)).collect();
+    if unique.is_empty() {
+        return unique;
+    }
     unique.sort_unstable();
-    let order: Vec<usize> = unique.iter().map(|p| p.1).collect();
-    let mut keep = longest_increasing(&order);
-    keep.sort_unstable();
-    keep.into_iter().map(|k| unique[k]).collect()
+    let by_base: Vec<(usize, usize)> = {
+        let order: Vec<usize> = unique.iter().map(|p| p.1).collect();
+        longest_increasing(&order).into_iter().map(|k| unique[k]).collect()
+    };
+    let by_other: Vec<(usize, usize)> = {
+        let mut flipped: Vec<(usize, usize)> = unique.iter().map(|&(i, j)| (j, i)).collect();
+        flipped.sort_unstable();
+        let order: Vec<usize> = flipped.iter().map(|p| p.1).collect();
+        let mut kept: Vec<(usize, usize)> =
+            longest_increasing(&order).into_iter().map(|k| (flipped[k].1, flipped[k].0)).collect();
+        kept.sort_unstable();
+        kept
+    };
+    let cost = |set: &[(usize, usize)]| {
+        let displacement: usize = set.iter().map(|&(i, j)| (i - alo).abs_diff(j - blo)).sum();
+        let mut keys: Vec<u64> = set.iter().filter_map(|&(i, _)| a[i]).collect();
+        keys.sort_unstable();
+        (std::cmp::Reverse(set.len()), displacement, keys)
+    };
+    if cost(&by_other) < cost(&by_base) { by_other } else { by_base }
 }
 
 /// Positions of one longest strictly increasing subsequence of `seq`.
@@ -219,22 +298,20 @@ pub fn longest_increasing(seq: &[usize]) -> Vec<usize> {
     keep
 }
 
-/// Bigram Dice similarity of two labels, 0..=1.
-fn label_similarity(a: &str, b: &str) -> f64 {
-    if a == b {
-        return 1.0;
-    }
-    let grams = |s: &str| {
-        let chars: Vec<char> = s.chars().collect();
-        let mut g: Vec<(char, char)> = chars.windows(2).map(|w| (w[0], w[1])).collect();
-        g.sort_unstable();
-        g
-    };
-    let (ga, gb) = (grams(a), grams(b));
+/// A label's sorted character bigrams, for Dice similarity.
+fn bigrams(s: &str) -> Vec<(char, char)> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut g: Vec<(char, char)> = chars.windows(2).map(|w| (w[0], w[1])).collect();
+    g.sort_unstable();
+    g
+}
+
+/// Bigram Dice similarity of two labels' bigrams, 0..=1.
+fn dice(ga: &[(char, char)], gb: &[(char, char)]) -> f64 {
     if ga.is_empty() || gb.is_empty() {
         return 0.0;
     }
-    2.0 * common(&ga, &gb) as f64 / (ga.len() + gb.len()) as f64
+    2.0 * common(ga, gb) as f64 / (ga.len() + gb.len()) as f64
 }
 
 /// The size of the multiset intersection of two sorted slices.
@@ -254,9 +331,9 @@ fn common<T: Ord>(a: &[T], b: &[T]) -> usize {
     n
 }
 
-/// How alike two items are, 0..=1: token Jaccard, averaged with label
-/// likeness when both have labels.
-pub fn similarity(a: &Item, b: &Item) -> f64 {
+/// Token Jaccard averaged with label likeness when both have labels;
+/// `grams` are the labels' bigrams (empty without a label).
+fn similarity_with(a: &Item, ga: &[(char, char)], b: &Item, gb: &[(char, char)]) -> f64 {
     let union = a.tokens.len() + b.tokens.len();
     let jaccard = if union == 0 {
         0.0
@@ -265,10 +342,24 @@ pub fn similarity(a: &Item, b: &Item) -> f64 {
         shared as f64 / (union - shared) as f64
     };
     match (&a.key, &b.key) {
-        (Some(ka), Some(kb)) => 0.5 * label_similarity(ka, kb) + 0.5 * jaccard,
+        (Some(ka), Some(kb)) => {
+            let label = if ka == kb { 1.0 } else { dice(ga, gb) };
+            0.5 * label + 0.5 * jaccard
+        }
         _ => jaccard,
     }
 }
+
+/// How alike two items are, 0..=1: token Jaccard, averaged with label
+/// likeness when both have labels.
+pub fn similarity(a: &Item, b: &Item) -> f64 {
+    let grams = |it: &Item| it.key.as_deref().map(bigrams).unwrap_or_default();
+    similarity_with(a, &grams(a), b, &grams(b))
+}
+
+/// Labels this alike count as evidence that two same-layout rows are one
+/// row edited, not a row replaced by an unrelated one.
+const MIN_LABEL_EVIDENCE: f64 = 0.25;
 
 /// Pairs the items of one gap by similarity, without crossing, maximizing
 /// total similarity (weighted LCS). Ties prefer the earlier base item.
@@ -285,17 +376,28 @@ fn fill_gap(
     if n == 0 || m == 0 {
         return;
     }
-    if n.saturating_mul(m) > MAX_GAP_WORK {
+    // Each similarity merges two token lists, so the work is the pairs plus
+    // every item's tokens once per item on the other side.
+    let tokens = |items: &[Item]| items.iter().map(|it| it.tokens.len()).sum::<usize>();
+    let work = n
+        .saturating_mul(m)
+        .saturating_add(tokens(&base[alo..ahi]).saturating_mul(m))
+        .saturating_add(tokens(&other[blo..bhi]).saturating_mul(n));
+    if n.saturating_mul(m) > MAX_GAP_WORK || work > MAX_GAP_TOKEN_WORK {
         *fell_back = true;
         out.extend((0..n.min(m)).map(|k| (alo + k, blo + k)));
         return;
     }
+    let grams = |items: &[Item]| -> Vec<Vec<(char, char)>> {
+        items.iter().map(|it| it.key.as_deref().map(bigrams).unwrap_or_default()).collect()
+    };
+    let (gb, go) = (grams(&base[alo..ahi]), grams(&other[blo..bhi]));
     let width = m + 1;
     let mut score = vec![0.0f64; (n + 1) * width];
     let mut sims = vec![0.0f64; n * m];
     for i in 0..n {
         for j in 0..m {
-            let s = similarity(&base[alo + i], &other[blo + j]);
+            let s = similarity_with(&base[alo + i], &gb[i], &other[blo + j], &go[j]);
             sims[i * m + j] = s;
             let diag = if s >= MIN_SIMILARITY { score[i * width + j] + s } else { f64::NEG_INFINITY };
             score[(i + 1) * width + j + 1] = score[i * width + j + 1].max(score[(i + 1) * width + j]).max(diag);
@@ -317,15 +419,23 @@ fn fill_gap(
         }
     }
     // Between the pairs found, an equal-sized run left over on both sides
-    // pairs by position when the options allow (columns) or when every item
-    // keeps its layout (a row whose label alone was edited).
+    // pairs by position when the options allow (columns), or when every row
+    // keeps its layout and shows some sign of being the same row (a shared
+    // value or a similar label): a row whose label alone was edited.
     found.reverse();
     let mut positional = Vec::new();
     let (mut a, mut b) = (alo, blo);
     for &(i, j) in found.iter().chain(std::iter::once(&(ahi, bhi))) {
         let len = i - a;
-        let same_shapes = || (0..len).all(|k| base[a + k].shape != 0 && base[a + k].shape == other[b + k].shape);
-        if len > 0 && len == j - b && (options.positional_equal_gaps || same_shapes()) {
+        let edited_in_place = || {
+            (0..len).all(|k| {
+                let (x, y) = (&base[a + k], &other[b + k]);
+                let evidence =
+                    common(&x.tokens, &y.tokens) > 0 || dice(&gb[a + k - alo], &go[b + k - blo]) >= MIN_LABEL_EVIDENCE;
+                x.shape != 0 && x.shape == y.shape && evidence
+            })
+        };
+        if len > 0 && len == j - b && (options.positional_equal_gaps || edited_in_place()) {
             positional.extend((0..len).map(|k| (a + k, b + k)));
         }
         (a, b) = (i + 1, j + 1);
@@ -412,12 +522,52 @@ mod tests {
 
     #[test]
     fn equal_gaps_of_the_same_shape_pair_by_position() {
-        let mut a = vec![item(Some("cash"), &[1]), item(Some("profit"), &[]), item(Some("total"), &[9])];
-        let mut b = vec![item(Some("cash"), &[1]), item(Some("loss"), &[]), item(Some("total"), &[9])];
+        let mut a = vec![item(Some("cash"), &[1]), item(Some("netprofit"), &[]), item(Some("total"), &[9])];
+        let mut b = vec![item(Some("cash"), &[1]), item(Some("netloss"), &[]), item(Some("total"), &[9])];
         assert_eq!(align(&a, &b, ROWS).pairs, [(0, 0), (2, 2)]);
         a[1].shape = 7;
         b[1].shape = 7;
         assert_eq!(align(&a, &b, ROWS).pairs, [(0, 0), (1, 1), (2, 2)]);
+        // The same layout alone is no evidence: an unrelated row replacing
+        // another stays a deletion and an insertion.
+        b[1].key = Some("goodwill".into());
+        assert_eq!(align(&a, &b, ROWS).pairs, [(0, 0), (2, 2)]);
+    }
+
+    #[test]
+    fn repeated_labels_do_not_shift_rows_after_an_insertion() {
+        // Every row says "krw"; their values differ. One row is inserted at the top.
+        let a: Vec<Item> = (0..50).map(|i| item(Some("krw"), &[1000 + i, 2000 + i])).collect();
+        let mut b = a.clone();
+        b.insert(0, item(Some("krw"), &[9999]));
+        let al = align(&a, &b, ROWS);
+        assert_eq!(al.pairs, (0..50).map(|i| (i, i + 1)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn unlabelled_tables_anchor_on_content() {
+        let a: Vec<Item> = (0..3000).map(|i| item(None, &[i, i + 10_000])).collect();
+        let mut b = a.clone();
+        b.insert(1500, item(None, &[77_777]));
+        let al = align(&a, &b, ROWS);
+        assert!(!al.fell_back);
+        assert_eq!(al.pairs.len(), 3000);
+        assert!(al.pairs.iter().all(|&(i, j)| j == if i < 1500 { i } else { i + 1 }));
+    }
+
+    #[test]
+    fn swapped_rows_mirror_when_the_sides_swap() {
+        let a = rows(&["h", "a", "b", "c"]);
+        let b = vec![a[0].clone(), a[2].clone(), a[1].clone(), a[3].clone()];
+        let ab = align(&a, &b, ROWS);
+        let ba = align(&b, &a, ROWS);
+        let flip = |v: &[(usize, usize)]| {
+            let mut f: Vec<(usize, usize)> = v.iter().map(|&(i, j)| (j, i)).collect();
+            f.sort_unstable();
+            f
+        };
+        assert_eq!(flip(&ab.pairs), ba.pairs);
+        assert_eq!(flip(&ab.moves), ba.moves);
     }
 
     #[test]
