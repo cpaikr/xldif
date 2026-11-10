@@ -6,18 +6,26 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** milestone M1 in progress. The reader and the read views
-(`inspect`, `cells`) work; `compare` comes next. See [PLAN.md](PLAN.md).
+**Status:** milestone M1 done. `compare` reports value changes and
+inserted, deleted, and moved rows, columns, and sheets. Formula,
+formatting, and object comparison and the HTML report come next. See
+[PLAN.md](PLAN.md).
 
 ## Commands
 
 - `xldif inspect BOOK` shows sheets (kind, visibility, used range, cell and
   formula counts), defined names, calculation settings, and the date system.
   It prints no cell contents.
+- `xldif compare BASE OTHER [--sheet NAME] [--kind value,row,column]
+  [--limit N] [--all] [--tolerance X] [--align content|position]` reports
+  what changed. Rows and columns pair by their labels and values, so an
+  inserted row is one `row` change; each change has a stable id, base and
+  other locations, a numeric delta (also for numbers stored as text), and
+  inferred row and column labels.
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
   with a value or formula: address, type, stored value, and formula text.
 
-Both accept `--format text`. Run `xldif <command> --help` for details.
+All accept `--format text`. Run `xldif <command> --help` for details.
 
 | Path | Purpose |
 |---|---|

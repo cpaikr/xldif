@@ -7,7 +7,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 const ROOT_AFTER: &str = "\
 Typical flow:
   1. xldif inspect book.xlsx                  sheets, ranges, counts (no contents)
-  2. xldif cells book.xlsx --sheet BS --range A1:F40 --format text
+  2. xldif compare old.xlsx new.xlsx          what changed, rows and columns aligned
+  3. xldif compare old.xlsx new.xlsx --sheet BS --kind value --format text
+  4. xldif cells new.xlsx --sheet BS --range A1:F40 --format text
 
 Output:
   Commands print one JSON object to stdout: {ok, command, result, warnings,
@@ -37,6 +39,21 @@ pub struct Cli {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Kind {
+    Value,
+    Row,
+    Column,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum Align {
+    /// Match rows and columns by labels and values.
+    Content,
+    /// Compare A1 with A1.
+    Position,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     Json,
     Text,
@@ -50,6 +67,46 @@ pub enum Command {
     Inspect {
         /// The workbook (.xlsx or .xlsm).
         book: PathBuf,
+        #[arg(long, value_enum, default_value_t = Format::Json)]
+        format: Format,
+    },
+    /// What changed between two workbooks. Sheets pair by name (or by
+    /// content when renamed); rows and columns pair by labels and values, so
+    /// an inserted row is one `row` change. Values are compared on paired
+    /// rows and columns. Formulas, formatting, and objects come later.
+    #[command(after_help = "Examples:
+  xldif compare v1.xlsx v2.xlsx
+  xldif compare v1.xlsx v2.xlsx --sheet BS --kind value --format text
+  xldif compare v1.xlsx v2.xlsx --limit 0 --tolerance 0.005
+
+Reading the result:
+  summary counts every change; `listed` and `omitted` say what the filters and
+  --limit left out, by sheet and kind. Each change has a stable id, a kind
+  (value, row, column), a status (changed, onlyBase, onlyOther, moved), base
+  and other locations, a numeric delta, and inferred row/column labels.
+  alignment.rows/cols are runs [base start, other start, length].")]
+    Compare {
+        /// The earlier workbook (left side).
+        base: PathBuf,
+        /// The later workbook (right side).
+        other: PathBuf,
+        /// Only the sheet with this name in either workbook.
+        #[arg(long)]
+        sheet: Option<String>,
+        /// Only these kinds of change.
+        #[arg(long, value_enum, value_delimiter = ',')]
+        kind: Vec<Kind>,
+        /// The most changes to list; 0 lists every change.
+        #[arg(long, default_value_t = 500)]
+        limit: usize,
+        /// Also list sheets with no changes.
+        #[arg(long)]
+        all: bool,
+        /// Numbers closer than this are equal.
+        #[arg(long, default_value_t = 0.0)]
+        tolerance: f64,
+        #[arg(long, value_enum, default_value_t = Align::Content)]
+        align: Align,
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,
     },
@@ -84,6 +141,7 @@ impl Command {
     pub const fn name(&self) -> &'static str {
         match self {
             Self::Inspect { .. } => "inspect",
+            Self::Compare { .. } => "compare",
             Self::Cells { .. } => "cells",
         }
     }

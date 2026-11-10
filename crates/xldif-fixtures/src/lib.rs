@@ -61,6 +61,30 @@ pub fn edge_cases() -> Vec<u8> {
         .build()
 }
 
+/// A workbook from text grids, one per sheet: a cell that parses as a
+/// number is written as one, an empty string leaves the cell blank, and
+/// anything else is text. Row 1 of the grid is sheet row 1.
+pub fn grid_book(sheets: &[(&str, &[&[&str]])]) -> Vec<u8> {
+    let mut book = Workbook::new();
+    for (name, rows) in sheets {
+        let sheet = book.add_worksheet().set_name(*name).expect("valid sheet name");
+        for (r, row) in rows.iter().enumerate() {
+            for (c, text) in row.iter().enumerate() {
+                let (r, c) = (r as u32, c as u16);
+                if text.is_empty() {
+                    continue;
+                }
+                match text.parse::<f64>() {
+                    Ok(n) => sheet.write_number(r, c, n),
+                    Err(_) => sheet.write_string(r, c, *text),
+                }
+                .expect("cell in range");
+            }
+        }
+    }
+    book.save_to_buffer().expect("workbook builds")
+}
+
 /// Every fixture, by file name, for checks outside Rust.
 pub fn all() -> Vec<(&'static str, Vec<u8>)> {
     vec![

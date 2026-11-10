@@ -154,6 +154,53 @@ def parity() -> None:
             print(f"ok   parity {label}")
 
 
+def compare_smoke() -> None:
+    """On the private corpus: every workbook compared with itself shows no
+    changes, and each pair of consecutive versions in a series compares
+    without error. Swapped pairs should mirror each other; mismatches are
+    counted for information (ties in ambiguous sheets may legitimately
+    break differently). Prints counts only."""
+    books = private_books()
+    if not books:
+        return
+
+    def run(a: Path, b: Path) -> dict | None:
+        proc = subprocess.run([str(EXE), "compare", str(a), str(b), "--limit", "1"], capture_output=True)
+        try:
+            env = json.loads(proc.stdout.decode("utf-8"))
+        except ValueError:
+            return None
+        return env["result"] if env.get("ok") else None
+
+    before = len(errors)
+    self_changes = sum(1 for b in books if (r := run(b, b)) is None or any(r["summary"].values()))
+    if self_changes:
+        fail(f"compare smoke: {self_changes} workbook(s) differ from themselves or failed")
+    by_series: dict[Path, list[Path]] = {}
+    for b in books:
+        by_series.setdefault(b.parent, []).append(b)
+    pairs = [(s[i], s[i + 1]) for s in by_series.values() for i in range(len(s) - 1)]
+    failed = asymmetric = 0
+    mirror = {
+        "rowsOnlyBase": "rowsOnlyOther",
+        "columnsOnlyBase": "columnsOnlyOther",
+        "rowsMoved": "rowsMoved",
+        "columnsMoved": "columnsMoved",
+        "value": "value",
+    }
+    for a, b in pairs:
+        ab, ba = run(a, b), run(b, a)
+        if ab is None or ba is None:
+            failed += 1
+        elif any(ab["summary"][k] != ba["summary"][v] for k, v in mirror.items()):
+            asymmetric += 1
+    if failed:
+        fail(f"compare smoke: {failed} of {len(pairs)} version pair(s) failed to compare")
+    if len(errors) == before:
+        print(f"ok   compare smoke ({len(books)} self-compares, {len(pairs)} version pairs, "
+              f"{asymmetric} not mirrored when swapped)")
+
+
 def main() -> int:
     if SKILLS.is_dir():
         for skill in sorted(p for p in SKILLS.iterdir() if p.is_dir()):
@@ -161,6 +208,7 @@ def main() -> int:
     run_cargo()
     cli_smoke()
     parity()
+    compare_smoke()
     if errors:
         print(f"\n{len(errors)} check(s) failed")
         return 1
