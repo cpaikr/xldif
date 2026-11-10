@@ -70,6 +70,15 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 .map(|k| match k {
                     Kind::Value => diff::Kind::Value,
                     Kind::Formula => diff::Kind::Formula,
+                    Kind::Format => diff::Kind::Format,
+                    Kind::Merge => diff::Kind::Merge,
+                    Kind::Comment => diff::Kind::Comment,
+                    Kind::Validation => diff::Kind::Validation,
+                    Kind::ConditionalFormat => diff::Kind::ConditionalFormat,
+                    Kind::Hyperlink => diff::Kind::Hyperlink,
+                    Kind::Sheet => diff::Kind::Sheet,
+                    Kind::Name => diff::Kind::Name,
+                    Kind::Theme => diff::Kind::Theme,
                     Kind::Row => diff::Kind::Row,
                     Kind::Column => diff::Kind::Column,
                 })
@@ -230,6 +239,14 @@ fn change_text(c: &Change) -> String {
             let _ = write!(line, " (expected ={})", escape(e));
         }
     }
+    for p in &c.properties {
+        let _ = write!(line, "\t{}: {} → {}", p.name, escape(&p.base), escape(&p.other));
+    }
+    if c.properties.is_empty()
+        && let Some(text) = c.other.as_ref().or(c.base.as_ref()).and_then(|l| l.text.as_deref())
+    {
+        let _ = write!(line, "\t{}", escape(text));
+    }
     if let Some(l) = &c.labels {
         let parts: Vec<&str> = [l.row.as_deref(), l.column.as_deref()].into_iter().flatten().collect();
         if !parts.is_empty() {
@@ -244,7 +261,7 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
     let s = &l.summary;
     let _ = writeln!(
         out,
-        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other, {} renamed; rows +{} -{} moved {}; columns +{} -{} moved {}; {} value change(s)",
+        "{} → {}: {} sheet(s) changed, {} only in base, {} only in other, {} renamed; rows +{} -{} moved {} restyled {}; columns +{} -{} moved {} restyled {}; {} value, {} formula, {} format, {} object change(s)",
         escape(&l.base.file),
         escape(&l.other.file),
         s.sheets_changed,
@@ -254,10 +271,15 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
         s.rows_only_other,
         s.rows_only_base,
         s.rows_moved,
+        s.rows_changed,
         s.columns_only_other,
         s.columns_only_base,
         s.columns_moved,
-        s.value
+        s.columns_changed,
+        s.value,
+        s.formula,
+        s.format,
+        s.objects
     );
     for sheet in &l.sheets {
         let name = match (&sheet.base, &sheet.other) {
@@ -269,6 +291,13 @@ fn compare_text(l: &Listing, warnings: &[Warning]) -> String {
         let _ = writeln!(out, "\n[{name}] {}{moved}", sheet.status.as_str());
         for c in &sheet.changes {
             let _ = writeln!(out, "{}", change_text(c));
+        }
+    }
+    if !l.objects.is_empty() {
+        out.push_str("\n[workbook]\n");
+        for c in &l.objects {
+            // Workbook objects have no cell; their id names them (name:Rate).
+            let _ = writeln!(out, "{}\t{}", escape(&c.id), change_text(c));
         }
     }
     let omitted: usize = l.omitted.values().flat_map(|k| k.values()).sum();

@@ -7,11 +7,14 @@
 pub mod align;
 pub mod cellref;
 pub mod diff;
+mod diff_objects;
 mod error;
 pub mod formula;
 pub mod model;
 mod package;
 pub mod reader;
+mod sheet_objects;
+pub mod styles;
 pub mod views;
 mod xml;
 

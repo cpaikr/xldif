@@ -6,9 +6,11 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** milestones M1 and M2 done. `compare` reports value and formula
-changes and inserted, deleted, and moved rows, columns, and sheets.
-Formatting and object comparison and the HTML report come next. See
+**Status:** milestones M1–M3 done. `compare` reports value, formula, and
+format changes; inserted, deleted, and moved rows, columns, and sheets;
+row and column layout; and merges, comments, data validation, conditional
+formatting, hyperlinks, sheet visibility, defined names, and the theme.
+The HTML report comes next. See
 [PLAN.md](PLAN.md).
 
 ## Commands
@@ -16,7 +18,7 @@ Formatting and object comparison and the HTML report come next. See
 - `xldif inspect BOOK` shows sheets (kind, visibility, used range, cell and
   formula counts), defined names, calculation settings, and the date system.
   It prints no cell contents.
-- `xldif compare BASE OTHER [--sheet NAME] [--kind value,formula,row,column]
+- `xldif compare BASE OTHER [--sheet NAME] [--kind value,formula,format,...]
   [--limit N] [--all] [--tolerance X] [--align content|position]` reports
   what changed. Rows and columns pair by their labels and values, so an
   inserted row is one `row` change; each change has a stable id, base and

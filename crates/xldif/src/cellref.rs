@@ -49,7 +49,7 @@ pub fn parse_cell(text: &str) -> Option<(u32, u32)> {
 }
 
 /// A rectangle of cells, inclusive on both ends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Range {
     pub first_row: u32,
     pub first_col: u32,

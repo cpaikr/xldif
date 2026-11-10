@@ -134,3 +134,16 @@ fn expanded_shared_formula_text_is_bounded() {
     assert_eq!(code(read_bytes_with(book.clone(), &tight)), ErrorCode::InvalidArchive);
     assert!(read_bytes(book).is_ok());
 }
+
+#[test]
+fn column_records_outside_the_grid_are_ignored() {
+    let part = format!(
+        r#"<worksheet xmlns="{}"><cols><col min="4294967295" max="4294967295" hidden="1"/><col min="3" max="99999" width="5" customWidth="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#,
+        xldif_fixtures::raw::MAIN_NS
+    );
+    let book = read_bytes(RawBook::new().sheet_part("S", &part).build()).unwrap();
+    let cols = &book.sheets[0].layout.cols;
+    assert_eq!((cols.len(), cols[0].index, cols[0].last), (1, 3, xldif::cellref::MAX_COL));
+    let c = xldif::diff::compare("a", &book, "b", &book, xldif::diff::CompareOptions::default());
+    assert!(c.sheets[0].changes.is_empty());
+}

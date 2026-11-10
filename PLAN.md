@@ -18,7 +18,13 @@ Status:
   in the private corpus match openpyxl's expansion), and formulas compared
   through the alignment, including references to other sheets and renamed
   sheets, with runs folded.
-- Next action: M3, formatting and workbook objects.
+- M3 is done except number-format display strings and dates as ISO text:
+  formats (resolved per cell, colors symbolic, folded into rectangles),
+  row and column layout, merges, comments (threaded ones replacing their
+  legacy copy), data validation, conditional formatting (as rules),
+  hyperlinks, sheet visibility, defined names (references carried through
+  the alignment), and the theme, all mapped through the alignment.
+- Next action: M4, the HTML report.
 
 ## Decisions
 

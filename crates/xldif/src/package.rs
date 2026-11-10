@@ -62,7 +62,11 @@ pub struct Relationship {
     /// The relationship type's last path segment, such as `worksheet`. The
     /// transitional and strict namespaces differ only before it.
     pub kind: String,
+    /// A member name for an internal target; the address as written for an
+    /// external one.
     pub target: String,
+    /// Points outside the package (a web address, another workbook).
+    pub external: bool,
 }
 
 pub struct Package<R> {
@@ -165,8 +169,8 @@ impl<R: Read + Seek> Package<R> {
     }
 
     /// The relationships of `part` (from `<dir>/_rels/<file>.rels`), with
-    /// internal targets resolved against the part's directory. External
-    /// targets (hyperlinks, linked workbooks) are left out.
+    /// internal targets resolved against the part's directory and external
+    /// ones (hyperlinks, linked workbooks) kept as written.
     pub fn relationships(&mut self, part: &str) -> Result<Vec<Relationship>, Error> {
         let (dir, file) = part.rsplit_once('/').map_or(("", part), |(d, f)| (d, f));
         let rels_name = if dir.is_empty() { format!("_rels/{file}.rels") } else { format!("{dir}/_rels/{file}.rels") };
@@ -178,16 +182,15 @@ impl<R: Read + Seek> Package<R> {
         loop {
             match parser.next()? {
                 Event::Start(e) if e.name == "Relationship" => {
-                    if e.attr("TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External")) {
-                        continue;
-                    }
+                    let external = e.attr("TargetMode").is_some_and(|m| m.eq_ignore_ascii_case("External"));
                     let (Some(id), Some(kind), Some(target)) = (e.attr("Id"), e.attr("Type"), e.attr("Target")) else {
                         continue;
                     };
                     out.push(Relationship {
                         id: id.to_owned(),
                         kind: kind.rsplit('/').next().unwrap_or(kind).to_owned(),
-                        target: resolve(dir, target),
+                        target: if external { target.to_owned() } else { resolve(dir, target) },
+                        external,
                     });
                 }
                 Event::Eof => return Ok(out),

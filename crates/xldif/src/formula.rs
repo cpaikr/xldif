@@ -638,6 +638,23 @@ pub struct SheetMap {
     pub cols: AxisMap,
 }
 
+/// A cell range carried through an alignment the way Excel moves a range:
+/// its corners follow their rows and columns, a deleted corner moves inward,
+/// and a range with nothing left is `None`.
+pub fn map_range(r: crate::cellref::Range, map: &SheetMap) -> Option<crate::cellref::Range> {
+    let corner = |row, col| Point::Cell { row, col, row_abs: false, col_abs: false };
+    let (a, b) = remap_range(&corner(r.first_row, r.first_col), &corner(r.last_row, r.last_col), &map.rows, &map.cols)?;
+    match (a, b) {
+        (Point::Cell { row: r1, col: c1, .. }, Point::Cell { row: r2, col: c2, .. }) => Some(crate::cellref::Range {
+            first_row: r1.min(r2),
+            first_col: c1.min(c2),
+            last_row: r1.max(r2),
+            last_col: c1.max(c2),
+        }),
+        _ => None,
+    }
+}
+
 fn remap_point(p: &Point, rows: &AxisMap, cols: &AxisMap) -> Option<Point> {
     Some(match *p {
         Point::Cell { row, col, row_abs, col_abs } => {

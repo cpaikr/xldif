@@ -110,7 +110,7 @@ fn gaps(pairs: &[(usize, usize)], n: usize, m: usize) -> Vec<((usize, usize), (u
 }
 
 /// A deterministic 64-bit FNV-1a hash.
-fn fnv(parts: &[&[u8]]) -> u64 {
+pub(crate) fn fnv(parts: &[&[u8]]) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for part in parts {
         for &b in *part {
