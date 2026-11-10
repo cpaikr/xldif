@@ -1,0 +1,21 @@
+{
+  "skill_name": "xldif",
+  "policy": "implicit",
+  "rationale": "Comparing spreadsheet versions is frequent in audit work and the vocabulary (two workbooks, versions, what changed, xlsx) is distinctive; near misses guard against editing, recalculation, and non-Excel formats.",
+  "should_trigger": [
+    "이 두 엑셀 파일(v1.xlsx, v2.xlsx) 뭐가 달라졌는지 비교해 줘",
+    "Compare the client's revised trial balance workbook with last week's version.",
+    "C_매출채권 조서 260318 버전이랑 vf 버전 차이 보고서 만들어 줘",
+    "Did any formulas change between budget_v3.xlsm and budget_v4.xlsm?",
+    "Show me side by side what changed in the updated schedule.xlsx",
+    "어느 셀 숫자가 바뀌었는지 두 워크북 비교해서 알려줘"
+  ],
+  "should_not_trigger": [
+    "Add a new column for 2026 to schedule.xlsx",
+    "이 엑셀 수식 다시 계산해서 값 고쳐줘",
+    "Compare these two CSV exports line by line",
+    "Convert this .xlsb workbook to PDF",
+    "두 PDF 감사보고서 차이 비교해 줘",
+    "Merge the two Google Sheets into one"
+  ]
+}

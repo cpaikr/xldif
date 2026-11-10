@@ -9,7 +9,7 @@ file describes what exists now and the boundaries new code must respect.
 
 ```text
 skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──► crates/xldif
-  routing, judgment (M5)                      process contract     workbook rules
+  routing, judgment                           process contract     workbook rules
 ```
 
 - [`crates/xldif`](crates/xldif/src/lib.rs) owns every workbook rule and has
@@ -41,7 +41,8 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     `compare` listing;
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
-  The agent skill and releases arrive with M5 (see PLAN.md › Architecture).
+  The [`xldif` skill](skills/xldif/SKILL.md) never reads workbooks itself:
+  it chooses commands, reads envelopes, and owns what to report.
 - [`crates/xldif-cli`](crates/xldif-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document
   ([envelope.rs](crates/xldif-cli/src/envelope.rs)).

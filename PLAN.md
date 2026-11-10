@@ -30,7 +30,15 @@ Status:
   sheet list, details panel, "changes only" view, large sheets trimmed to
   changed rows and their context). Checked in a browser on a synthetic
   demo pair (`cargo run -p xldif-fixtures --example write_demo -- DIR`).
-- Next action: M5, the agent skill and the release.
+- M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
+  with evals on the synthetic demo pair) and a release workflow that builds
+  Windows, Linux, and macOS archives when a `v*` tag is pushed.
+- Next action: the maintainer (`sjunepark`, the only actor the release
+  workflow accepts) decides the first version, sets it in `Cargo.toml`, and
+  pushes its `v*` tag.
+  Open items: number-format display strings and ISO dates for
+  date-formatted numbers; table styles; `x14` extension-list validation and
+  conditional formatting; `.xlsb` input.
 
 ## Decisions
 
