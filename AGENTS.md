@@ -52,7 +52,9 @@
 ## Validation
 
 - `python scripts/check.py` runs skill package checks, `cargo fmt`, `clippy`
-  (pedantic, warnings denied), `test`, and a CLI smoke run of the built
-  executable. From M1, when `fixtures/private/` exists, it also runs the
-  private corpus without printing content; until then it only counts it.
+  (pedantic, warnings denied), `test`, a CLI smoke run, and reader parity
+  against openpyxl on the public fixtures. When `fixtures/private/` exists it
+  also runs parity and a compare smoke run (self-compares, swapped version
+  pairs, HTML reports) over the private corpus, printing counts only.
+  Parity needs `openpyxl`.
 - Run it after any change to code, the skill, or fixtures.
