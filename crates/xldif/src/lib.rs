@@ -12,6 +12,7 @@ mod error;
 pub mod formula;
 pub mod html;
 pub mod model;
+pub mod numfmt;
 mod package;
 pub mod reader;
 mod sheet_objects;

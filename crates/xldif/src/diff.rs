@@ -25,6 +25,7 @@ use crate::align::{self, Alignment, Item, Options};
 use crate::cellref::{MAX_COL, MAX_ROW, Range, cell_name, col_name};
 use crate::formula::{self, AxisMap, SheetMap};
 use crate::model::{Cell, Formula, FormulaKind, Row, Sheet, Value, Warning, Workbook};
+use crate::numfmt::Formats;
 use crate::views::{JsonValue, json_value, stale_value_warnings};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +157,13 @@ pub struct Location {
     pub kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<JsonValue>,
+    /// The value as the cell shows it, when its number format changes how
+    /// it reads (`1,234.50`, `31-Mar-24`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// A date-formatted number as ISO 8601 (`2024-03-31`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     /// The formula as stored (without `=`); for a folded change, the one in
     /// its first cell.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,6 +359,11 @@ pub fn compare(
     let mut sheets = Vec::new();
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
+    let shared = Shared {
+        maps: &maps,
+        options,
+        formats: (Formats::new(&base.styles, base.date1904), Formats::new(&other.styles, other.date1904)),
+    };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
         let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
@@ -360,7 +373,7 @@ pub fn compare(
         paired_other[*oi] = true;
         let o = &other.sheets[*oi];
         let this = &maps[&b.name.to_lowercase()];
-        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &maps, options);
+        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &shared);
         adjusted += n_adjusted;
         let (bs, os) = (
             crate::diff_objects::Side { sheet: b, styles: &base.styles },
@@ -1045,15 +1058,24 @@ struct FormulaEdit {
     shape: (String, String, String),
 }
 
+/// What every sheet pair's comparison reads besides its own grids.
+struct Shared<'a> {
+    /// Every sheet's row and column maps, for references across sheets.
+    maps: &'a HashMap<String, SheetMap>,
+    options: CompareOptions,
+    /// The base and other workbooks' number formats.
+    formats: (Formats<'a>, Formats<'a>),
+}
+
 fn sheet_changes(
     id: &str,
     gb: &Grid,
     go: &Grid,
     al: &Aligned,
     this: &SheetMap,
-    maps: &HashMap<String, SheetMap>,
-    options: CompareOptions,
+    shared: &Shared,
 ) -> (Vec<Change>, usize) {
+    let Shared { maps, options, formats } = shared;
     let (col_al, row_al) = (&al.cols, &al.rows);
     let mut changes = Vec::new();
     for &c in &col_al.lone_base {
@@ -1160,8 +1182,8 @@ fn sheet_changes(
                 id: format!("{id}:value:{bn}:{on}"),
                 kind: Kind::Value,
                 status,
-                base: Some(cell_location(bn, vb)),
-                other: Some(cell_location(on, vo)),
+                base: Some(cell_location(bn, vb, cell_b.map_or(0, |c| c.style), &formats.0)),
+                other: Some(cell_location(on, vo, cell_o.map_or(0, |c| c.style), &formats.1)),
                 delta,
                 expected: None,
                 labels: Some(labels_for(rb, cb, ro, co)),
@@ -1240,9 +1262,16 @@ fn fold_formula_edits(
     out
 }
 
-fn cell_location(cell: String, v: &Value) -> Location {
+fn cell_location(cell: String, v: &Value, style: u32, formats: &Formats) -> Location {
     let kind = (!matches!(v, Value::Empty)).then(|| v.type_name());
-    Location { cell: Some(cell), kind, value: json_value(v), ..Location::default() }
+    Location {
+        cell: Some(cell),
+        kind,
+        value: json_value(v),
+        display: formats.display(style, v),
+        date: formats.iso_date(style, v),
+        ..Location::default()
+    }
 }
 
 fn axis_change(

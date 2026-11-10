@@ -58,5 +58,7 @@
   against openpyxl on the public fixtures. When `fixtures/private/` exists it
   also runs parity and a compare smoke run (self-compares, swapped version
   pairs, HTML reports) over the private corpus, printing counts only.
-  Parity needs `openpyxl`.
+  Parity needs `openpyxl`. On Windows with Excel and `pywin32` it also
+  checks display text against Excel on a synthetic probe; `--excel` adds
+  the private corpus.
 - Run it after any change to code, the skill, or fixtures.

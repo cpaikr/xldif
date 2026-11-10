@@ -32,7 +32,10 @@ CLI. See [PLAN.md](PLAN.md).
   writes the side-by-side report instead (it never replaces a compared
   workbook, and replaces another file only with `--force`).
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
-  with a value or formula: address, type, stored value, and formula text.
+  with a value or formula: address, type, stored value, formula text, the
+  text the cell shows when its number format changes it (`display`), and
+  date-formatted numbers as ISO dates (`date`). Value changes in `compare`
+  carry the same two fields.
 
 All accept `--format text`. Run `xldif <command> --help` for details.
 

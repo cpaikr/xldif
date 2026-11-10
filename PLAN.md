@@ -18,7 +18,10 @@ Status:
   in the private corpus match openpyxl's expansion), and formulas compared
   through the alignment, including references to other sheets and renamed
   sheets, with runs folded.
-- M3 is done except number-format display strings and dates as ISO text:
+- M3 is done: number-format display text and ISO dates (`display` and
+  `date` on cells and value changes; the HTML grid shows display text),
+  checked against Excel's `Range.Text` on a synthetic probe and the private
+  corpus (every cell matches except locale-dependent built-in formats);
   formats (resolved per cell, colors symbolic, folded into rectangles),
   row and column layout, merges, comments (threaded ones replacing their
   legacy copy), data validation, conditional formatting (as rules),
@@ -36,9 +39,9 @@ Status:
 - Next action: the maintainer (`sjunepark`, the only actor the release
   workflow accepts) decides the first version, sets it in `Cargo.toml`, and
   pushes its `v*` tag.
-  Open items: number-format display strings and ISO dates for
-  date-formatted numbers; table styles; `x14` extension-list validation and
-  conditional formatting; `.xlsb` input.
+  Open items: table styles; `x14` extension-list validation and
+  conditional formatting; `.xlsb` input; row and column labels from
+  date-formatted header cells (labels still show the serial number).
 
 ## Decisions
 
@@ -112,10 +115,15 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
 - **`diff`:** cell, row, column, and object changes over an alignment, plus
   context labels, change folding, and the summary.
 - **`numfmt`:** an Excel number-format renderer for display strings,
-  covering sections, conditions, dates and times, and literal text. A code
-  it can't render falls back to the raw value with the code noted, never an
-  error. Display strings are a convenience only: comparisons use typed
-  values.
+  covering sections, conditions, dates and times, fractions, scientific
+  notation, and literal text. Every code renders; built-in codes that
+  depend on the locale show dates in ISO form and numbers as General.
+  Column width (`####`), `*` fill, edge padding, colors, and the locale's
+  date separator are not reproduced. Display strings are a convenience
+  only: comparisons use typed values. Rules that could only be learned from
+  Excel (the sign under conditional sections, negative zero, continued-
+  fraction denominators, the case of `am/pm`) were observed through
+  `scripts/display_parity.py` and are pinned by unit tests.
 - **`render`:** text, JSON (serde structs), and HTML.
 
 The CLI owns argument parsing, the envelope, exit codes, and refusing to

@@ -140,6 +140,13 @@ pub struct CellView {
     /// Absent for an empty value; error literals appear as text.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value: Option<JsonValue>,
+    /// The value as the cell shows it, when its number format changes how
+    /// it reads (`1,234.50`, `31-Mar-24`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
+    /// A date-formatted number as ISO 8601 (`2024-03-31`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub formula: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,7 +181,8 @@ pub fn find_sheet<'a>(book: &'a Workbook, name: &str) -> Result<&'a Sheet, Error
 
 /// Cells with content in `sheet`, row by row, optionally inside `range`,
 /// at most `limit` of them (`None` lists all).
-pub fn cells(sheet: &Sheet, range: Option<Range>, limit: Option<usize>) -> Cells {
+pub fn cells(book: &Workbook, sheet: &Sheet, range: Option<Range>, limit: Option<usize>) -> Cells {
+    let formats = crate::numfmt::Formats::new(&book.styles, book.date1904);
     let mut out = Vec::new();
     let mut omitted = 0;
     for (row, cell) in sheet.cells().filter(|(_, c)| c.has_content()) {
@@ -191,6 +199,8 @@ pub fn cells(sheet: &Sheet, range: Option<Range>, limit: Option<usize>) -> Cells
             cell: cell_name(row, cell.col),
             kind: cell.value.type_name(),
             value,
+            display: formats.display(cell.style, &cell.value),
+            date: formats.iso_date(cell.style, &cell.value),
             formula: formula.map(|f| f.text.clone()),
             formula_kind: formula.map(|f| f.kind),
             formula_range: formula.and_then(|f| f.range.clone()),

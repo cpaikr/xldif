@@ -24,7 +24,10 @@ cell-by-cell comparison without row matching.
 
 Each change has a stable `id` (`s0:value:D14:D15` = sheet 0, base D14, other
 D15), a `kind`, a `status`, `base` and `other` locations, and often `labels`
-and `properties`.
+and `properties`. A value change's locations carry the stored `value` and,
+when the number format changes how it reads, `display` (`1,234.50`, `(500)`);
+date-formatted numbers also carry `date` (ISO 8601). Quote `display` or
+`date` to a person and `value` for arithmetic.
 
 | kind | meaning |
 |---|---|
