@@ -24,7 +24,13 @@ Status:
   legacy copy), data validation, conditional formatting (as rules),
   hyperlinks, sheet visibility, defined names (references carried through
   the alignment), and the theme, all mapped through the alignment.
-- Next action: M4, the HTML report.
+- M4 is done: `compare --format html -o FILE` writes one self-contained
+  report (aligned grids side by side, inserted/deleted/moved rows and
+  columns marked, cells colored by change kind, next/previous navigation,
+  sheet list, details panel, "changes only" view, large sheets trimmed to
+  changed rows and their context). Checked in a browser on a synthetic
+  demo pair (`cargo run -p xldif-fixtures --example write_demo -- DIR`).
+- Next action: M5, the agent skill and the release.
 
 ## Decisions
 

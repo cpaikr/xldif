@@ -10,6 +10,7 @@ pub mod diff;
 mod diff_objects;
 mod error;
 pub mod formula;
+pub mod html;
 pub mod model;
 mod package;
 pub mod reader;

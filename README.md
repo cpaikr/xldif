@@ -6,12 +6,12 @@ are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
 No Excel installation is needed.
 
-**Status:** milestones M1–M3 done. `compare` reports value, formula, and
+**Status:** milestones M1–M4 done. `compare` reports value, formula, and
 format changes; inserted, deleted, and moved rows, columns, and sheets;
 row and column layout; and merges, comments, data validation, conditional
 formatting, hyperlinks, sheet visibility, defined names, and the theme.
-The HTML report comes next. See
-[PLAN.md](PLAN.md).
+`--format html -o report.html` writes a self-contained side-by-side
+report for people.
 
 ## Commands
 
@@ -26,7 +26,9 @@ The HTML report comes next. See
   inferred row and column labels. Formulas are compared after Excel's own
   adjustment for inserted and deleted rows, so `=D30` becoming `=D31` under
   an inserted row is not a change, while a rewrite shows both formulas and
-  the one Excel would have kept (`expected`).
+  the one Excel would have kept (`expected`). `--format html -o FILE`
+  writes the side-by-side report instead (it never replaces a compared
+  workbook, and replaces another file only with `--force`).
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells
   with a value or formula: address, type, stored value, and formula text.
 

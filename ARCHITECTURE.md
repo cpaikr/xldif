@@ -34,12 +34,14 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     records, merges, comments, validation, conditional formats, hyperlinks;
   - [diff_objects.rs](crates/xldif/src/diff_objects.rs): formats, layout, and
     those objects compared through the alignment;
+  - [html.rs](crates/xldif/src/html.rs): the self-contained side-by-side
+    report, built from a comparison listing and the two workbooks;
   - [diff.rs](crates/xldif/src/diff.rs): sheet pairing, column-then-row
     alignment, value and formula changes, labels, folding, and the
     `compare` listing;
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
-  The HTML report arrives with M4 (see PLAN.md › Architecture).
+  The agent skill and releases arrive with M5 (see PLAN.md › Architecture).
 - [`crates/xldif-cli`](crates/xldif-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document
   ([envelope.rs](crates/xldif-cli/src/envelope.rs)).

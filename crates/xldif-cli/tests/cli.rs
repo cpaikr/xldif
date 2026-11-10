@@ -300,3 +300,75 @@ fn compare_reports_formula_changes_in_json_and_text() {
     let text = xldif(["compare", s(&base), s(&other), "--kind", "formula", "--format", "text"]);
     assert!(text.stdout.contains("formula	changed	B4→B4	=B2-B3 → =B2+B3	Net | 2025"), "{}", text.stdout);
 }
+
+#[test]
+fn compare_writes_a_self_contained_html_report() {
+    let work = Work::new();
+    let grid =
+        |v: &str| xldif_fixtures::grid_book(&[("BS", &[&["Account", "2025"], &["<script>alert(1)</script>", v]])]);
+    let base = work.file("v1.xlsx", &grid("1"));
+    let other = work.file("v2.xlsx", &grid("2"));
+    let report = work.0.join("report.html");
+
+    let run = xldif(["compare", s(&base), s(&other), "--format", "html"]);
+    assert_eq!(envelope(&failure_run(run))["error"]["code"], "invalid_argument");
+
+    let env = ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]), "compare");
+    assert_eq!(env["result"]["summary"]["value"], 1);
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    // Self-contained: no external scripts, styles, images, or fonts.
+    for needle in ["<script src", "<link", "<img", "url(http", "@import"] {
+        assert!(!html.contains(needle), "{needle}");
+    }
+    // Workbook text never becomes markup, even inside the embedded data.
+    assert!(!html.contains("<script>alert(1)"));
+
+    let again = xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]);
+    assert_eq!(envelope(&failure_run(again))["error"]["code"], "output_exists");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--force"]), "compare");
+    let over_input = xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&base), "--force"]);
+    assert_eq!(envelope(&failure_run(over_input))["error"]["code"], "output_exists");
+    assert!(std::fs::read(&base).unwrap().starts_with(b"PK"), "the input is untouched");
+}
+
+fn failure_run(run: Run) -> Run {
+    assert_eq!(run.code, 1, "{}", run.stdout);
+    run
+}
+
+#[test]
+fn html_grids_follow_the_alignment_whatever_is_listed() {
+    let work = Work::new();
+    let base =
+        work.file("a.xlsx", &xldif_fixtures::grid_book(&[("S", &[&["k", "v"], &["Cash", "1"], &["Debt", "2"]])]));
+    let other = work.file(
+        "b.xlsx",
+        &xldif_fixtures::grid_book(&[(
+            "S",
+            &[&["k", "v", "new"], &["Cash", "1", "x"], &["Loans", "9", ""], &["Debt", "3", "y"]],
+        )]),
+    );
+    let report = work.0.join("r.html");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--kind", "value"]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    // The inserted row is drawn (as a one-sided row) even though only values are listed.
+    assert!(html.contains("class=\"r ro"), "inserted row missing");
+    assert!(html.contains("Loans"));
+
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report), "--force"]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    // The inserted column's header carries its change for navigation.
+    assert!(html.contains("<th class=\"ch co\" data-c="), "column change not marked");
+
+    let dir = work.0.join("a-dir");
+    std::fs::create_dir(&dir).unwrap();
+    let env = envelope(&failure_run(xldif(["compare", s(&base), s(&other), "-o", s(&dir), "--force"])));
+    assert_eq!(env["error"]["code"], "invalid_argument");
+    let leftovers: Vec<_> = std::fs::read_dir(&work.0)
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "temporary files left behind");
+}

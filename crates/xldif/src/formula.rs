@@ -618,14 +618,21 @@ impl AxisMap {
         offset(o1, i64::from(index) + 1, self.max)
     }
 
+    /// A range corner: like [`map`](Self::map), but a row that moved
+    /// elsewhere leaves the range as a deleted one does, rather than
+    /// dragging the corner to where it went.
+    fn corner(&self, n: u32) -> Option<u32> {
+        if self.moves.binary_search_by_key(&n, |m| m.0).is_ok() { None } else { self.map(n) }
+    }
+
     /// The first surviving number at or after `n`, up to `limit`, mapped.
     fn map_forward(&self, n: u32, limit: u32) -> Option<u32> {
-        (n..=limit).take(self.deleted.len() + 1).find_map(|k| self.map(k))
+        (n..=limit).take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
     }
 
     /// The last surviving number at or before `n`, down to `limit`, mapped.
     fn map_backward(&self, n: u32, limit: u32) -> Option<u32> {
-        (limit..=n).rev().take(self.deleted.len() + 1).find_map(|k| self.map(k))
+        (limit..=n).rev().take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
     }
 }
 
@@ -800,6 +807,21 @@ mod tests {
         assert_eq!(r("R2C3"), "'R2C3'!A1");
         assert_eq!(r("TRUE"), "'TRUE'!A1");
         assert_eq!(r("Notes"), "Notes!A1");
+    }
+
+    #[test]
+    fn a_moved_row_at_a_range_edge_leaves_the_range() {
+        // Base rows 2..=6 summed; row 2 moved below the total (to 9); rows 3..=6 move up one.
+        let pairs = vec![(1, 1), (3, 2), (4, 3), (5, 4), (6, 5), (7, 6)];
+        let map = SheetMap {
+            renamed_to: None,
+            rows: AxisMap::new(pairs, vec![(2, 9)], vec![], vec![], 1_048_576),
+            cols: AxisMap::identity(16_384),
+        };
+        // The corner skips the moved row instead of following it to row 9.
+        assert_eq!(render(&remap(&tokenize("SUM(B2:B6)"), &map, |_| None)), "SUM(B2:B5)");
+        // A single reference to the moved row follows it.
+        assert_eq!(render(&remap(&tokenize("B2"), &map, |_| None)), "B9");
     }
 
     #[test]
