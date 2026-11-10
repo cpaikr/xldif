@@ -28,7 +28,9 @@ installed version.
 ## Interpret the output
 
 Each command prints one JSON object: `ok`, `command`, `result`, `warnings`,
-`error`, `metadata`. Exit 0 means `ok: true`; 1 is a failure with
+`error`, `metadata` — except with `--format text`, which prints a plain
+listing to read as text (failures are still JSON), and `--format html -o`,
+whose report goes to the file while stdout carries the JSON envelope. Exit 0 means `ok: true`; 1 is a failure with
 `error.code`, `error.message`, and often `error.hint`; 2 is an invalid
 invocation. Read `warnings` before reporting: values are the results Excel
 last saved, and a warning says when they may be stale (manual calculation,

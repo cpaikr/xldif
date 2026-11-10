@@ -46,8 +46,10 @@
 
 - `.github/workflows/release.yml` builds and publishes archives when a `v*`
   tag matching the workspace version in `Cargo.toml` is pushed. The
-  workspace version is the version authority. Never push tags or create
-  releases as part of ordinary implementation work.
+  workspace version is the version authority. The workflow runs only for
+  tags pushed by `sjunepark` (the maintainer); change its `if:` to add
+  others. Never push tags or create releases as part of ordinary
+  implementation work.
 
 ## Validation
 
