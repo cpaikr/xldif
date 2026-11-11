@@ -439,6 +439,8 @@ fn dates_in_different_date_systems_compare_by_the_date_they_show() {
             ("North depot", 43_830.0, 0.25, 12.0),
             ("South depot", 43_831.0, 0.5, 43_830.0),
             ("East depot", 43_840.0, 0.5, 7.0),
+            ("West depot", 43_841.3, 0.5, 7.0),
+            ("Port", 43_842.0, 0.5, 7.0),
         ],
     );
     let other = delivery_book(
@@ -447,6 +449,10 @@ fn dates_in_different_date_systems_compare_by_the_date_they_show() {
             ("North depot", 45_292.0, 0.25, 12.0),
             ("South depot", 45_294.0, 0.75, 45_292.0),
             ("East depot", 45_302.0, 0.5, 7.0),
+            // The same moment, where adding the offset rounds; and a fifth
+            // of a second later, which the date shown does not reveal.
+            ("West depot", 45_303.3, 0.5, 7.0),
+            ("Port", 45_304.0 + 0.2 / 86_400.0, 0.5, 7.0),
         ],
     );
     let (b, o) = (read_bytes(base).unwrap(), read_bytes(other).unwrap());
@@ -455,7 +461,8 @@ fn dates_in_different_date_systems_compare_by_the_date_they_show() {
     let s = &c.sheets[0];
     // The same dates are the same; the count that happens to equal a
     // serial is a plain number and still compares as one.
-    assert_eq!(brief(s), ["value Changed B3→B3", "value Changed C3→C3", "value Changed D3→D3"]);
+    assert_eq!(brief(s), ["value Changed B3→B3", "value Changed C3→C3", "value Changed D3→D3", "value Changed B6→B6"]);
+    assert!(s.changes[3].delta.is_some_and(|d| (d * 86_400.0 - 0.2).abs() < 1e-3), "{:?}", s.changes[3].delta);
     let side = |c: &Change| (c.base.as_ref().unwrap().date.clone(), c.other.as_ref().unwrap().date.clone());
     let (due, at, boxes) = (&s.changes[0], &s.changes[1], &s.changes[2]);
     assert_eq!(side(due), (Some("2024-01-02".into()), Some("2024-01-03".into())));

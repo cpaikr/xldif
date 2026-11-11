@@ -1234,11 +1234,10 @@ fn sheet_changes(
                 let shown_b = formats.0.iso_date(cell_b?.style, vb)?;
                 let shown_o = formats.1.iso_date(cell_o?.style, vo)?;
                 let on_one_scale = |shown: &str, v: f64, offset: f64| if shown.contains('-') { v + offset } else { v };
-                Some(if shown_b == shown_o {
-                    0.0
-                } else {
-                    on_one_scale(&shown_o, *y, oo) - on_one_scale(&shown_b, *x, ob)
-                })
+                let days = on_one_scale(&shown_o, *y, oo) - on_one_scale(&shown_b, *x, ob);
+                // Adding the offset rounds in the last binary place: under
+                // a ten-thousandth of a second, the serials are the same.
+                Some(if days.abs() < 1e-9 { 0.0 } else { days })
             });
             let same = match days_apart {
                 Some(days) => days.abs() <= options.tolerance,
