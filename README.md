@@ -55,8 +55,9 @@ All accept `--format text`. Run `xldif <command> --help` for details.
 
 ## Installing
 
-Download a release archive (once one is published) or build from source;
-see [installation](skills/xldif/references/installation.md).
+Download the Windows release archive (once one is published), or build from
+source on any platform; see
+[installation](skills/xldif/references/installation.md).
 
 ## Building
 

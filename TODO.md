@@ -63,7 +63,6 @@ the first two.
      and defined names, but validation and conditional-format formulas
      still compare the number as written, and so do the alignment's
      formula tokens (a renumbered link makes a formula another token).
-   - The release workflow builds Linux and macOS archives nobody uses.
 
 ## Features
 

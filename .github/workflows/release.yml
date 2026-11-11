@@ -12,52 +12,42 @@ permissions:
 jobs:
   build:
     if: github.actor == 'sjunepark'
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - os: windows-2025
-            target: x86_64-pc-windows-msvc
-            exe: xldif.exe
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            exe: xldif
-          - os: macos-14
-            target: aarch64-apple-darwin
-            exe: xldif
-    runs-on: ${{ matrix.os }}
+    # Windows only: xldif is used beside Excel. Other platforms build from
+    # source, and CI still checks Linux.
+    runs-on: windows-2025
     timeout-minutes: 30
     env:
       RUSTUP_TOOLCHAIN: 1.88.0
+      TARGET: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Set up Rust 1.88
-        run: rustup toolchain install 1.88.0 --profile minimal --target ${{ matrix.target }}
+        shell: bash
+        run: rustup toolchain install 1.88.0 --profile minimal --target "$TARGET"
       - name: Tag matches the workspace version
         shell: bash
         run: |
           version=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
           test "v$version" = "$GITHUB_REF_NAME"
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }} -p xldif-cli
+        shell: bash
+        run: cargo build --release --locked --target "$TARGET" -p xldif-cli
       - name: Smoke test
         shell: bash
-        run: ./target/${{ matrix.target }}/release/${{ matrix.exe }} --version
+        run: ./target/$TARGET/release/xldif.exe --version
       - name: Package
         shell: bash
         run: |
-          name=xldif-${GITHUB_REF_NAME}-${{ matrix.target }}
+          name=xldif-${GITHUB_REF_NAME}-${TARGET}
           mkdir "$name"
-          cp target/${{ matrix.target }}/release/${{ matrix.exe }} README.md LICENSE.md "$name"/
-          if [ "${{ runner.os }}" = "Windows" ]; then 7z a "$name.zip" "$name" >/dev/null; else tar czf "$name.tar.gz" "$name"; fi
+          cp "target/$TARGET/release/xldif.exe" README.md LICENSE.md "$name"/
+          7z a "$name.zip" "$name" >/dev/null
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ${{ matrix.target }}
-          path: |
-            xldif-*.zip
-            xldif-*.tar.gz
+          name: x86_64-pc-windows-msvc
+          path: xldif-*.zip
 
   publish:
     needs: build
@@ -74,4 +64,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes xldif-*.zip xldif-*.tar.gz
+        run: gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes xldif-*.zip

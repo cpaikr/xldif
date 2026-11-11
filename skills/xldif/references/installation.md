@@ -5,9 +5,10 @@ Excel.
 
 ## From a release
 
-When the repository has published releases, download the archive for the
-platform from its Releases page, extract `xldif` (`xldif.exe` on Windows),
-and put it on `PATH`. Check with `xldif --version`.
+Releases carry one archive, for Windows x64. When the repository has
+published releases, download it from the Releases page, extract
+`xldif.exe`, and put it on `PATH`. Check with `xldif --version`. On other
+platforms, build from source.
 
 ## From source
 
@@ -23,7 +24,7 @@ or, in a checkout:
 cargo build --release
 ```
 
-and use `target/release/xldif`.
+and use `target/release/xldif` (`xldif.exe` on Windows).
 
 ## After installing
 

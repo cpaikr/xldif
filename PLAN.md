@@ -35,7 +35,9 @@ Status:
   demo pair (`cargo run -p xldif-fixtures --example write_demo -- DIR`).
 - M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
   with evals on the synthetic demo pair) and a release workflow that builds
-  Windows, Linux, and macOS archives when a `v*` tag is pushed.
+  the Windows x64 archive when a `v*` tag is pushed. Windows is the only
+  release target: the tool is used beside Excel. CI still checks Linux, and
+  other platforms build from source.
 - The project review (2026-11-11) kept Rust and the own reader and put
   correctness of the comparison ahead of new features. Its first fixes
   are in; the rest, in order, is in [TODO.md](TODO.md).
@@ -489,8 +491,8 @@ is proven on real files before the full reader is built.
     the size limits.
 - **M5 Skill and release.**
   - The skill with its evals.
-  - Windows x64 release first, using dsdai's `release.py` pattern, then
-    other targets.
+  - A Windows x64 release (`.github/workflows/release.yml`). Other targets
+    were built at first and dropped: nobody uses them.
   - `version` and `upgrade` only if distribution needs them.
 
 ## Risks to watch
