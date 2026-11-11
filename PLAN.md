@@ -41,7 +41,8 @@ Status:
 - The project review (2026-11-11) kept Rust and the own reader and put
   correctness of the comparison ahead of new features. Its first fixes
   are in; the rest, in order, is in [TODO.md](TODO.md).
-- Next action: the alignment item in [TODO.md](TODO.md#review-follow-ups).
+- Next action: the comparison-model item in
+  [TODO.md](TODO.md#review-follow-ups).
 
 ## Decisions
 
@@ -275,39 +276,70 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
 3. **Order: columns, then rows.** Column alignment uses values only, which
    an inserted row barely changes; row alignment then uses the column map,
    so an inserted column cannot break row matching.
-4. **Matching each axis**, in three passes:
-   - First on whole content (label plus tokens), so unchanged rows anchor
-     even when labels repeat (a currency or entity column) or are absent
-     (a table of numbers); then on labels alone inside the gaps that leave,
-     for rows whose values changed; then by similarity.
-   - Each key pass trims equal keys at both ends.
-   - Patience: keys unique on both sides anchor the region, keeping their
-     longest in-order run, so one moved row cannot pull its neighbours out
-     of line. When several runs are longest, both orientations are tried
-     and the one that moves items least wins, so swapping the files mirrors
-     the result.
-   - Where no key is unique, anchor on the rarest shared key (at most 64
-     occurrences) with its longest run, and recurse.
-   - In the gaps between anchors, pair items by similarity (bigram label
-     likeness averaged with token Jaccard) with a weighted LCS, at least
-     0.5, never crossing.
+4. **Matching each axis.** Two items are the same row or column to the
+   degree their similarity says (bigram label likeness averaged with token
+   Jaccard). An alignment is the set of pairs, never crossing, with the
+   greatest total similarity; a pair below 0.5 is never made. Two steps
+   find it without comparing every item with every other:
+   - **Anchors.** Items whose whole content (label plus tokens) occurs once
+     on each side of a region are candidates to pair, and so are items
+     whose label does: a statement line keeps its name while its figures
+     change. The longest in-order run of all candidates anchors, so one
+     line that moved, changed or not, cannot pull its neighbours out of
+     line or split the region across every line it passed. Equal items at
+     a region's two ends pair as well. Each anchor splits its region and
+     the parts are searched again.
+   - A label shared by several rows (a currency or entity column) never
+     pairs two of them ahead of their content. An earlier version matched
+     runs of equal labels first, which paired every row after an insertion
+     with the row above its own.
+   - **Gaps.** Between anchors a weighted LCS picks the pairs.
    - A leftover equal-sized run pairs by position for columns (headers often
      change wholesale between periods), and for rows when every row keeps
      its layout and shows some sign of being the same row (a shared value,
      or labels at least 0.25 alike): a row whose label alone was edited is
      one value change, while an unrelated row replacing another stays a
      deletion and an insertion.
-   - The planned explicit cost model was not needed: these thresholds and
-     the layout rule gave clean results on the corpus. Revisit only if a
-     real file shows a bad choice.
+   - `--tolerance` reaches the tokens: a number at least eight buckets
+     from zero is put in a bucket eight tolerances wide, so rows that
+     differ only by float noise still pair. Bucket edges sit off round
+     decimals. Smaller numbers keep exact tokens, or rates under a
+     tolerance sized for amounts would all be one token. Two numbers on
+     either side of an edge differ as tokens; their row then pairs on the
+     rest of its content.
 5. **Moves.** Unpaired items with the same key and the same tokens, unique
    on each side, are moves (`rowMoves`, `colMoves`).
 6. **Determinism and symmetry.** Hashes are fixed (FNV-1a) and every tie
-   breaks by index, never by hash order. On the private corpus all 29
-   workbooks compare clean against themselves and all 24 consecutive version
-   pairs mirror exactly when swapped (`scripts/check.py`).
-7. **Bounds.** A gap larger than 4 million item pairs, or 200 million token
-   comparisons, is paired by position instead, with an `alignment_fallback` warning and `fellBack: true`.
+   breaks by index, never by hash order. Ties broken by index would depend
+   on which file is the base, so each sheet pair is aligned in a fixed
+   order (by a hash of the two sheets' content) and the result turned round
+   when that is not the order given: swapping the files mirrors the rows,
+   columns, and values reported. Formula changes have a direction and do
+   not mirror: a row inserted inside a total is a change, the same row
+   deleted is not. Property tests over random workbooks hold both this and
+   "a workbook against itself shows nothing, in JSON and in the report"
+   (`crates/xldif/tests/properties.rs`); `scripts/check.py` counts the same
+   on the private corpus.
+7. **Bounds.** The gap pass compares every item of a gap with every other,
+   up to 4 million pairs or 200 million token comparisons. A region with
+   no anchor that is larger than 1 million pairs, or than that budget, is
+   split on weaker evidence first, each kind tried in turn:
+   - a run of 2 to 32 consecutive rows whose contents occur once, as a run,
+     on each side (a table stacked twice);
+   - a token that occurs once on each side, which votes for the two rows
+     holding it: rows that are each other's first choice, and similar
+     enough to pair, anchor (every row edited, but not in every cell);
+   - a run of consecutive labels that occurs once on each side;
+   - failing those, rows at the region's two ends, paired in file order for
+     as long as they are similar enough to pair (labels repeating in a
+     cycle, with a block inserted in the middle).
+
+   A gap still over the budget is searched only near its diagonal (rows
+   mostly keep their order and few come or go); with no room for even that
+   it is paired by position. Pairing from the ends, the search near the
+   diagonal, and pairing by position can each miss the best alignment, and
+   nothing they find can show that they did not, so each sets
+   `fellBack: true` and an `alignment_fallback` warning.
    `--align position` compares A1 with A1 throughout.
 8. **Objects follow the alignment (M3).** Merges, comments, data
    validation, conditional formatting ranges, and hyperlinks are mapped
@@ -348,9 +380,7 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     or when its address now holds a cell that came from another row or
     column (a deleted row's place taken by the row below). A range is
     judged by its ends, and an end that stays inside the range does not
-    count: rows reordered within a total leave it unchanged. A removed
-    blank row is reported the same way but without `expected`, because the
-    row maps still carry a blank row to the same number. Otherwise the
+    count: rows reordered within a total leave it unchanged. Otherwise the
     unchanged text wins: a row edited in place can align as deleted plus
     inserted, and the formula was not touched.
   - `#REF!` (and `Sheet!#REF!`) from a deleted reference is an adjustment.
@@ -370,7 +400,12 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     the number as written.
   - Blank rows between two paired rows are matched in order with the other
     side's blank rows in the same gap, so a spacer row next to an inserted
-    or deleted line maps where Excel moved it.
+    or deleted line maps where Excel moved it. When the two gaps hold
+    different numbers of blank rows, a blank row keeps its offset from the
+    pair before it (a blank row someone typed into is still that row), and
+    one carried past the end of the other side's gap is a deleted row: the
+    blank row was removed, and formulas, merges, comments, and rules over
+    it are treated as Excel treats a deleted row.
   - Cached values are compared separately, as values.
 - **Formatting:**
   - Compare each written cell's resolved properties: number format, font

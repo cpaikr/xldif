@@ -267,6 +267,9 @@ fn unchanged_text_over_a_removed_blank_row_is_a_change() {
     let c = run(&[("S", base)], &[("S", other)]);
     let f = formulas(&c);
     assert_eq!(f.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s0:formula:D1:D1", "s0:formula:D4:D4"]);
+    // The removed row is a deleted row to the formulas over it, as to Excel.
+    assert_eq!(f[0].expected.as_deref(), Some("#REF!"));
+    assert_eq!(f[1].expected.as_deref(), Some("SUM(B2:B4)"));
 }
 
 #[test]

@@ -238,8 +238,9 @@ pub type Run = [u32; 3];
 pub struct AlignmentView {
     /// `content`, or `position` when asked for with `--align position`.
     pub method: &'static str,
-    /// Part of the sheet was too large to align by content and was paired
-    /// by position instead.
+    /// Part of the sheet was too large to compare every row with every
+    /// other: it was searched only near its diagonal, or paired by
+    /// position, and rows there may be paired with the wrong ones.
     pub fell_back: bool,
     /// Runs of paired rows by row number. Rows not covered are listed as
     /// `row` changes (or are blank).
@@ -351,7 +352,8 @@ pub fn compare(
     let aligned: Vec<(usize, usize, bool, Grid, Grid, Aligned)> = pairs
         .iter()
         .map(|&(bi, oi, renamed)| {
-            let (gb, go) = (Grid::new(&base.sheets[bi], &formats.0), Grid::new(&other.sheets[oi], &formats.1));
+            let grid = |sheet, formats| Grid::new(sheet, formats, options.tolerance);
+            let (gb, go) = (grid(&base.sheets[bi], &formats.0), grid(&other.sheets[oi], &formats.1));
             let al = align_grids(&gb, &go, options);
             (bi, oi, renamed, gb, go, al)
         })
@@ -396,7 +398,8 @@ pub fn compare(
             warnings.push(Warning {
                 code: "alignment_fallback",
                 message: format!(
-                    "sheet {:?}: part of the sheet was too large to align by content and was compared by position",
+                    "sheet {:?}: part of the sheet was too large to align fully by content; rows or columns there \
+                     may be paired with the wrong ones",
                     b.name
                 ),
             });
@@ -574,10 +577,38 @@ fn fnv(parts: &[&[u8]]) -> u64 {
     h
 }
 
-fn value_bytes(v: &Value) -> Option<Vec<u8>> {
+/// How many tolerances wide a bucket of numbers is in alignment tokens.
+const TOLERANCE_BUCKET: f64 = 8.0;
+/// A number takes a bucket only when it is at least this many buckets from
+/// zero. Smaller ones would nearly all share a bucket (rates under a
+/// tolerance sized for amounts), and rows told apart only by them could no
+/// longer be.
+const BUCKETS_FROM_ZERO: f64 = 8.0;
+/// Where a bucket's edges sit within it. Off the round decimals that
+/// amounts are typed in, so a figure and the same figure with float noise
+/// do not straddle an edge.
+const BUCKET_PHASE: f64 = 0.381_966;
+
+/// A value as bytes for an alignment token; `None` for nothing to align on.
+///
+/// With a tolerance, a number large against it is put in a bucket
+/// [`TOLERANCE_BUCKET`] tolerances wide, so numbers the comparison will call
+/// equal mostly share a token and float noise does not unpair their rows.
+/// Two such numbers on either side of a bucket's edge still differ here,
+/// and so do small numbers that differ at all; a row is paired on the rest
+/// of its content then.
+fn value_bytes(v: &Value, tolerance: f64) -> Option<Vec<u8>> {
     Some(match v {
         Value::Empty => return None,
-        Value::Number(n) => [b"n".as_slice(), &n.to_bits().to_le_bytes()].concat(),
+        Value::Number(n) => {
+            let width = tolerance * TOLERANCE_BUCKET;
+            if width > 0.0 && n.abs() >= width * BUCKETS_FROM_ZERO {
+                [b"q".as_slice(), &(n / width + BUCKET_PHASE).floor().to_bits().to_le_bytes()].concat()
+            } else {
+                // Adding zero turns -0.0, which equals 0.0, into it.
+                [b"n".as_slice(), &(n + 0.0).to_bits().to_le_bytes()].concat()
+            }
+        }
         Value::Text(t) if t.is_empty() => return None,
         Value::Text(t) => [b"t".as_slice(), t.as_bytes()].concat(),
         Value::Bool(b) => vec![b'b', u8::from(*b)],
@@ -667,12 +698,12 @@ pub fn numeric_text(text: &str) -> Option<f64> {
 /// `=B6*2` in row 6 are the same token, as they are after an insertion). A
 /// cell with neither (formatting only, or an empty string) contributes
 /// nothing, so its row or column is not an item at all.
-fn cell_tokens(cell: &Cell, row: u32) -> impl Iterator<Item = Vec<u8>> + '_ {
+fn cell_tokens(cell: &Cell, row: u32, tolerance: f64) -> impl Iterator<Item = Vec<u8>> + '_ {
     let formula = cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| {
         let form = formula::relative_form(&formula::tokenize(&f.text), row, cell.col);
         [b"f".as_slice(), form.as_bytes()].concat()
     });
-    value_bytes(&cell.value).into_iter().chain(formula)
+    value_bytes(&cell.value, tolerance).into_iter().chain(formula)
 }
 
 fn display_label(text: &str) -> String {
@@ -713,12 +744,14 @@ struct Grid<'a> {
     /// Each column's header texts in the top content rows, in row order;
     /// the first is the column's label.
     headers: HashMap<u32, Vec<String>>,
+    /// The comparison's tolerance, for number tokens.
+    tolerance: f64,
 }
 
 impl<'a> Grid<'a> {
-    fn new(sheet: &'a Sheet, formats: &Formats) -> Self {
+    fn new(sheet: &'a Sheet, formats: &Formats, tolerance: f64) -> Self {
         let has_tokens =
-            |c: &Cell| value_bytes(&c.value).is_some() || c.formula.as_ref().is_some_and(|f| !f.text.is_empty());
+            |c: &Cell| value_bytes(&c.value, 0.0).is_some() || c.formula.as_ref().is_some_and(|f| !f.text.is_empty());
         let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(has_tokens)).collect();
         let mut by_col: std::collections::BTreeMap<u32, Vec<(u32, &Cell)>> = std::collections::BTreeMap::new();
         for row in &rows {
@@ -749,7 +782,26 @@ impl<'a> Grid<'a> {
                 (*col, texts)
             })
             .collect();
-        Self { sheet, rows, cols, headers }
+        Self { sheet, rows, cols, headers, tolerance }
+    }
+
+    /// A hash of everything alignment reads, to put two grids in a fixed
+    /// order whichever is the base.
+    fn digest(&self) -> u64 {
+        let mut h = 0u64;
+        let mut mix = |parts: &[&[u8]]| h = fnv(&[&h.to_le_bytes(), &fnv(parts).to_le_bytes()]);
+        for (col, _) in &self.cols {
+            let header = self.headers.get(col).map(|h| h.join("/")).unwrap_or_default();
+            mix(&[&col.to_le_bytes(), header.as_bytes()]);
+        }
+        for row in &self.rows {
+            for c in &row.cells {
+                let value = value_bytes(&c.value, self.tolerance).unwrap_or_default();
+                let formula = c.formula.as_ref().map_or("", |f| f.text.as_str());
+                mix(&[&row.index.to_le_bytes(), &c.col.to_le_bytes(), &value, formula.as_bytes()]);
+            }
+        }
+        h
     }
 
     /// The written cells of one row, in column order.
@@ -798,8 +850,9 @@ impl<'a> Grid<'a> {
                     .flat_map(|(r, c)| {
                         // A column's formulas change form whenever a column they
                         // refer to moves, so they only stand in for a missing value.
-                        let value = value_bytes(&c.value);
-                        let formula = if value.is_none() { cell_tokens(c, *r).collect() } else { Vec::new() };
+                        let value = value_bytes(&c.value, self.tolerance);
+                        let formula =
+                            if value.is_none() { cell_tokens(c, *r, self.tolerance).collect() } else { Vec::new() };
                         value.into_iter().chain(formula)
                     })
                     .map(|b| fnv(&[&b]))
@@ -821,7 +874,9 @@ impl<'a> Grid<'a> {
                 for c in &row.cells {
                     let Some(id) = col_ids.get(&c.col) else { continue };
                     let before = tokens.len();
-                    tokens.extend(cell_tokens(c, row.index).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])));
+                    tokens.extend(
+                        cell_tokens(c, row.index, self.tolerance).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])),
+                    );
                     if tokens.len() > before {
                         shape.extend_from_slice(&id.to_le_bytes());
                     }
@@ -844,7 +899,7 @@ fn pair_sheets(base: &Workbook, other: &Workbook) -> Vec<(usize, usize, bool)> {
         }
     }
     let tokens = |s: &Sheet| {
-        let mut t: Vec<u64> = s.cells().filter_map(|(_, c)| value_bytes(&c.value)).map(|b| fnv(&[&b])).collect();
+        let mut t: Vec<u64> = s.cells().filter_map(|(_, c)| value_bytes(&c.value, 0.0)).map(|b| fnv(&[&b])).collect();
         t.sort_unstable();
         Item { key: None, tokens: t, shape: 0 }
     };
@@ -936,6 +991,21 @@ impl Axis {
         }
     }
 
+    /// The same axis seen from the other side.
+    fn flipped(self) -> Self {
+        let flip = |v: Vec<(u32, u32)>| {
+            let mut v: Vec<(u32, u32)> = v.into_iter().map(|(b, o)| (o, b)).collect();
+            v.sort_unstable();
+            v
+        };
+        Self {
+            pairs: flip(self.pairs),
+            moves: flip(self.moves),
+            lone_base: self.lone_other,
+            lone_other: self.lone_base,
+        }
+    }
+
     fn view_runs(&self) -> (Vec<Run>, Vec<Run>) {
         let mut moves: Vec<Run> = self.moves.iter().map(|&(b, o)| [b, o, 1]).collect();
         moves.sort_unstable();
@@ -984,7 +1054,19 @@ impl Aligned {
     }
 }
 
+/// Aligns one sheet pair. Alignment breaks its ties by position, so which
+/// grid is the base would otherwise decide them: the grids go in in a fixed
+/// order and the result is turned round, and swapped files give the
+/// mirrored result.
 fn align_grids(gb: &Grid, go: &Grid, options: CompareOptions) -> Aligned {
+    if options.align == AlignMode::Content && gb.digest() > go.digest() {
+        let al = align_in_order(go, gb, options);
+        return Aligned { cols: al.cols.flipped(), rows: al.rows.flipped(), ..al };
+    }
+    align_in_order(gb, go, options)
+}
+
+fn align_in_order(gb: &Grid, go: &Grid, options: CompareOptions) -> Aligned {
     let col_numbers = |g: &Grid| g.cols.iter().map(|(c, _)| *c).collect::<Vec<u32>>();
     let row_numbers = |g: &Grid| g.rows.iter().map(|r| r.index).collect::<Vec<u32>>();
     let (bc, oc, br, or) = (col_numbers(gb), col_numbers(go), row_numbers(gb), row_numbers(go));
@@ -1060,8 +1142,7 @@ fn diff_formulas(
             let unchanged = formula::same(tb, &to);
             // Unchanged text whose address now holds a cell that came from
             // another row or column: a deleted row's place taken by the row
-            // below it. This also catches a removed blank row, which the
-            // maps carry to the same number and so call no adjustment.
+            // below it.
             let displaced = unchanged && formula::retargets(&to, back, |name| inverse.get(&name.to_lowercase()));
             if formula::same(&moved, &to) && !displaced {
                 if unchanged { FormulaDiff::Same } else { FormulaDiff::Adjusted }
@@ -1246,7 +1327,7 @@ fn sheet_changes(
             if same {
                 continue;
             }
-            let status = match (value_bytes(vb), value_bytes(vo)) {
+            let status = match (value_bytes(vb, 0.0), value_bytes(vo, 0.0)) {
                 (None, _) => Status::OnlyOther,
                 (_, None) => Status::OnlyBase,
                 _ => Status::Changed,
@@ -1508,6 +1589,25 @@ mod tests {
             assert_eq!(label_key(text).as_deref(), Some(key), "{text}");
         }
         assert_eq!(label_key("   "), None);
+    }
+
+    #[test]
+    fn number_tokens_follow_the_tolerance_only_for_large_numbers() {
+        use super::{Value, value_bytes};
+        let token = |n: f64, tolerance: f64| value_bytes(&Value::Number(n), tolerance);
+        // Zero has one token, whatever its sign.
+        assert_eq!(token(0.0, 0.0), token(-0.0, 0.0));
+        assert_ne!(token(1.0, 0.0), token(1.0 + f64::EPSILON, 0.0));
+        // Under a tolerance, an amount and the same amount with noise share
+        // a token, also when it is typed to the cent.
+        for amount in [1234.56, 99_999.99, -4321.04, 1_000_000.0] {
+            assert_eq!(token(amount, 0.01), token(amount + 1e-9, 0.01), "{amount}");
+        }
+        assert_ne!(token(1234.56, 0.01), token(1235.56, 0.01));
+        // Numbers small against the tolerance keep their own tokens: rates
+        // under a tolerance sized for amounts still tell rows apart.
+        assert_ne!(token(0.035, 0.5), token(0.0425, 0.5));
+        assert_eq!(token(0.035, 0.5), token(0.035, 0.0));
     }
 
     #[test]

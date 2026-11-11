@@ -24,7 +24,7 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   - [cellref.rs](crates/xldif/src/cellref.rs): A1 references and ranges;
   - [views.rs](crates/xldif/src/views.rs): `inspect` and `cells` results;
   - [align.rs](crates/xldif/src/align.rs): sequence alignment of rows or
-    columns (key anchors, similarity in the gaps, moves);
+    columns (anchors on unique content, similarity in the gaps, moves);
   - [formula.rs](crates/xldif/src/formula.rs): formula tokens, shifting
     (shared formulas), remapping through an alignment, and position-free
     forms for folding;
@@ -63,11 +63,17 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   count are capped ([package.rs](crates/xldif/src/package.rs),
   [xml.rs](crates/xldif/src/xml.rs), [reader.rs](crates/xldif/src/reader.rs)).
   Hostile input fails with `invalid_archive` instead of exhausting memory or
-  the stack. Alignment work is capped per gap; a gap beyond the cap pairs by
-  position with an `alignment_fallback` warning.
+  the stack. Alignment work is capped per gap; a gap beyond the cap, with
+  no evidence to split it, is paired from its ends, searched only near its
+  diagonal, or paired by position, each with an `alignment_fallback`
+  warning: the best alignment may have been missed.
 - **Deterministic results.** Content hashes are fixed (FNV-1a) and every
   alignment tie breaks by index, so the same inputs always give the same
   changes and ids. Change ids derive from locations, never from list order.
+- **Swapped files mirror.** Each sheet pair is aligned in a fixed order,
+  whichever file is the base, so the rows, columns, and values reported for
+  `A B` are those for `B A` with the sides exchanged. Formula changes have
+  a direction and are exempt.
 - **Stored values only.** The reader takes each cell's cached result as
   written; nothing is recalculated. `inspect` warns when values may be stale
   (manual calculation, recalculate-on-open, formulas without a result).
@@ -122,7 +128,12 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`crates/xldif/tests/compare.rs`](crates/xldif/tests/compare.rs) covers each
   alignment case: inserted, deleted, and moved rows; an inserted column with
   inserted rows; spacer rows; renumbered labels; renamed and moved sheets;
-  swap symmetry.
+  swap symmetry; rows under one repeated label; a tolerance.
+- [`crates/xldif/tests/properties.rs`](crates/xldif/tests/properties.rs)
+  holds two properties over random small workbooks: a workbook against
+  itself shows nothing in JSON or in the report, and swapping the files
+  mirrors the comparison. [align.rs](crates/xldif/src/align.rs) holds the
+  alignment's own (pairs keep order, use each item once, and are similar).
 - [`scripts/display_parity.py`](scripts/display_parity.py) compares display
   text with Excel's own (`Range.Text`, through COM on Windows) on a
   synthetic probe of format codes, and on given workbooks with counts only.
