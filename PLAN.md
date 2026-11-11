@@ -298,8 +298,10 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - Compare by type, then by value. Numbers report a `delta`; `--tolerance`
     suppresses tiny float noise.
   - Numbers formatted as dates also carry an ISO date, taken from each
-    side's own date system. A date1904 mismatch gives a warning, and the
-    ISO dates are compared instead of the raw serials.
+    side's own date system. A date1904 mismatch gives a warning, and cells
+    formatted as dates on both sides compare by their ISO dates instead of
+    the raw serials, with `delta` in days. Alignment still reads the
+    serials.
   - A change of type is a change of its own.
 - **Formulas:**
   - Rewrite the base formula's references through the row and column maps

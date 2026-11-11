@@ -27,7 +27,10 @@ D15), a `kind`, a `status`, `base` and `other` locations, and often `labels`
 and `properties`. A value change's locations carry the stored `value` and,
 when the number format changes how it reads, `display` (`1,234.50`, `(500)`);
 date-formatted numbers also carry `date` (ISO 8601). Quote `display` or
-`date` to a person and `value` for arithmetic.
+`date` to a person and `value` for arithmetic. When the workbooks use
+different date systems (a `date_system_mismatch` warning), the same date has
+two serial numbers: date cells are then compared by `date`, and their
+`delta` is in days.
 
 | kind | meaning |
 |---|---|

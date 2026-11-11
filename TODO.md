@@ -56,8 +56,9 @@ the first two.
      property. Found while fixing ids 5–8 and 41–44, which now render as
      Korean Excel does (`locale_builtin` in
      [numfmt.rs](crates/xldif/src/numfmt.rs)).
-   - With different date systems the raw serials are compared, though
-     [PLAN.md](PLAN.md#cell-and-object-comparison) says ISO dates are.
+   - Between a 1900 and a 1904 workbook, date cells compare by the date
+     they show, but the alignment's tokens are still the serials, so equal
+     dates do not help pair rows there. It belongs with the alignment item.
    - [PLAN.md](PLAN.md#architecture)'s module list describes reader parts
      that were not built (`indexedColors`, `metadata.xml`, `applyX`
      resolution). [ARCHITECTURE.md](ARCHITECTURE.md) is accurate.

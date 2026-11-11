@@ -331,7 +331,7 @@ pub fn compare(
         warnings.push(Warning {
             code: "date_system_mismatch",
             message: "the workbooks use different date systems (1900 and 1904), so equal dates have different serial \
-                      numbers"
+                      numbers; cells formatted as dates on both sides are compared by the date they show"
                 .to_owned(),
         });
     }
@@ -364,7 +364,8 @@ pub fn compare(
     let mut sheets = Vec::new();
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
-    let shared = Shared { maps: &maps, inverse: &inverse, options, formats };
+    let date_offsets = (base.date1904 != other.date1904).then(|| (date_offset(base), date_offset(other)));
+    let shared = Shared { maps: &maps, inverse: &inverse, options, formats, date_offsets };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
         let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
@@ -1093,6 +1094,15 @@ struct Shared<'a> {
     options: CompareOptions,
     /// The base and other workbooks' number formats.
     formats: (Formats<'a>, Formats<'a>),
+    /// When the workbooks use different date systems: what to add to each
+    /// side's serials to put them on one scale.
+    date_offsets: Option<(f64, f64)>,
+}
+
+/// What to add to a workbook's date serials to get 1900-system serials: the
+/// 1904 system counts from 1904-01-01, which is 1,462 in the 1900 system.
+fn date_offset(book: &Workbook) -> f64 {
+    if book.date1904 { 1462.0 } else { 0.0 }
 }
 
 fn sheet_changes(
@@ -1192,7 +1202,27 @@ fn sheet_changes(
 
             let vb = cell_b.map_or(&Value::Empty, |c| &c.value);
             let vo = cell_o.map_or(&Value::Empty, |c| &c.value);
-            if same_value(vb, vo, options.tolerance) {
+            // Under different date systems the same date has two serials,
+            // so two date cells compare by the date they show, and their
+            // difference is in days on one scale. A time of day alone
+            // (`06:00:00`, no date part) is the same serial in both systems.
+            // (Alignment still reads the serials: see `value_bytes`.)
+            let days_apart = shared.date_offsets.and_then(|(ob, oo)| {
+                let (Value::Number(x), Value::Number(y)) = (vb, vo) else { return None };
+                let shown_b = formats.0.iso_date(cell_b?.style, vb)?;
+                let shown_o = formats.1.iso_date(cell_o?.style, vo)?;
+                let on_one_scale = |shown: &str, v: f64, offset: f64| if shown.contains('-') { v + offset } else { v };
+                Some(if shown_b == shown_o {
+                    0.0
+                } else {
+                    on_one_scale(&shown_o, *y, oo) - on_one_scale(&shown_b, *x, ob)
+                })
+            });
+            let same = match days_apart {
+                Some(days) => days.abs() <= options.tolerance,
+                None => same_value(vb, vo, options.tolerance),
+            };
+            if same {
                 continue;
             }
             let status = match (value_bytes(vb), value_bytes(vo)) {
@@ -1201,6 +1231,7 @@ fn sheet_changes(
                 _ => Status::Changed,
             };
             let delta = match (vb, vo) {
+                _ if days_apart.is_some() => days_apart,
                 (Value::Number(x), Value::Number(y)) => Some(y - x),
                 (Value::Text(x), Value::Text(y)) => numeric_text(x).zip(numeric_text(y)).map(|(x, y)| y - x),
                 _ => None,

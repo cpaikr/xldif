@@ -407,3 +407,69 @@ fn date_records_do_not_key_their_column() {
         assert_eq!(first.labels.as_ref().unwrap().column.as_deref(), Some("Due"));
     }
 }
+
+/// A list of deliveries: a date (style 1), a time of day (style 2), and a
+/// count, in the 1900 or the 1904 date system.
+fn delivery_book(date1904: bool, rows: &[(&str, f64, f64, f64)]) -> Vec<u8> {
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let styles = format!(
+        r#"<styleSheet xmlns="{main}"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="164" applyNumberFormat="1"/><xf numFmtId="20" applyNumberFormat="1"/></cellXfs></styleSheet>"#
+    );
+    let mut xml = String::from(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Delivery</t></is></c><c r="B1" t="inlineStr"><is><t>Due</t></is></c><c r="C1" t="inlineStr"><is><t>At</t></is></c><c r="D1" t="inlineStr"><is><t>Boxes</t></is></c></row>"#,
+    );
+    for (r, (label, due, at, boxes)) in (2..).zip(rows) {
+        xml.push_str(&format!(
+            r#"<row r="{r}"><c r="A{r}" t="inlineStr"><is><t>{label}</t></is></c><c r="B{r}" s="1"><v>{due}</v></c><c r="C{r}" s="2"><v>{at}</v></c><c r="D{r}"><v>{boxes}</v></c></row>"#
+        ));
+    }
+    let book = xldif_fixtures::raw::RawBook::new()
+        .workbook_rel("styles", "styles.xml")
+        .part("xl/styles.xml", styles.as_bytes());
+    let book = if date1904 { book.workbook_before(r#"<workbookPr date1904="1"/>"#) } else { book };
+    book.sheet("Deliveries", &xml).build()
+}
+
+#[test]
+fn dates_in_different_date_systems_compare_by_the_date_they_show() {
+    // 2024-01-01 is 45292 in the 1900 system and 43830 in the 1904 system.
+    let base = delivery_book(
+        true,
+        &[
+            ("North depot", 43_830.0, 0.25, 12.0),
+            ("South depot", 43_831.0, 0.5, 43_830.0),
+            ("East depot", 43_840.0, 0.5, 7.0),
+        ],
+    );
+    let other = delivery_book(
+        false,
+        &[
+            ("North depot", 45_292.0, 0.25, 12.0),
+            ("South depot", 45_294.0, 0.75, 45_292.0),
+            ("East depot", 45_302.0, 0.5, 7.0),
+        ],
+    );
+    let (b, o) = (read_bytes(base).unwrap(), read_bytes(other).unwrap());
+    let c = compare("base.xlsx", &b, "other.xlsx", &o, CompareOptions::default());
+    assert!(c.warnings.iter().any(|w| w.code == "date_system_mismatch"), "{:?}", c.warnings);
+    let s = &c.sheets[0];
+    // The same dates are the same; the count that happens to equal a
+    // serial is a plain number and still compares as one.
+    assert_eq!(brief(s), ["value Changed B3→B3", "value Changed C3→C3", "value Changed D3→D3"]);
+    let side = |c: &Change| (c.base.as_ref().unwrap().date.clone(), c.other.as_ref().unwrap().date.clone());
+    let (due, at, boxes) = (&s.changes[0], &s.changes[1], &s.changes[2]);
+    assert_eq!(side(due), (Some("2024-01-02".into()), Some("2024-01-03".into())));
+    assert_eq!(due.delta, Some(1.0), "one day later, not the serials' difference");
+    // A time of day is the same serial in both systems.
+    assert_eq!(side(at), (Some("12:00:00".into()), Some("18:00:00".into())));
+    assert_eq!(at.delta, Some(0.25));
+    assert_eq!(boxes.delta, Some(1462.0));
+
+    // Swapped, the same cells differ the other way.
+    let back = compare("other.xlsx", &o, "base.xlsx", &b, CompareOptions::default());
+    assert_eq!(brief(&back.sheets[0]), brief(s));
+    assert_eq!(back.sheets[0].changes[0].delta, Some(-1.0));
+    // In one date system the serials are compared as before.
+    let same = compare("base.xlsx", &b, "base.xlsx", &b, CompareOptions::default());
+    assert!(same.sheets[0].changes.is_empty() && same.warnings.iter().all(|w| w.code != "date_system_mismatch"));
+}
