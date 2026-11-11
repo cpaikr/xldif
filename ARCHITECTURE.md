@@ -68,6 +68,15 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
 - **Stored values only.** The reader takes each cell's cached result as
   written; nothing is recalculated. `inspect` warns when values may be stale
   (manual calculation, recalculate-on-open, formulas without a result).
+- **Say what is not read.** Content the model has no place for (charts and
+  other drawings, chart sheets, tables, pivot tables, embedded objects,
+  sheet and workbook protection, worksheet extension lists, external link
+  targets, VBA) is counted while reading and named in one `not_compared`
+  warning per workbook, so an empty comparison never silently covers it
+  ([reader.rs](crates/xldif/src/reader.rs)). The HTML report shows every
+  warning under its header. Autofilter criteria are the
+  exception: they are not read and not named, because the filter's range
+  (a defined name) and the rows it hides (row layout) are compared.
 - **Read what Excel keeps.** Values stored under a merged range's hidden
   cells and phonetic runs are file content: the former are read, the latter
   are excluded from text, as Excel displays it.
@@ -82,8 +91,9 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
   always JSON. stderr stays empty.
 - Exit 0 means `ok: true`; 1 is an execution failure with a stable
   `error.code` (`file_not_found`, `invalid_archive`, `unsupported_format`,
-  `invalid_xml`, `invalid_argument`, `output_exists`, `io_error`); 2 is an
-  invalid invocation (`invalid_invocation`).
+  `invalid_xml`, `invalid_argument`, `output_exists`, `io_error`, and
+  `internal_error` for a panic, which is a bug); 2 is an invalid invocation
+  (`invalid_invocation`).
 - Bare `xldif` prints exactly `xldif --help`.
 - `metadata` is `{tool: "xldif", version, contract}`.
 
@@ -99,7 +109,9 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
   intended differences it skips.
 - [`crates/xldif/tests/formulas.rs`](crates/xldif/tests/formulas.rs) covers
   formulas adjusted by inserted rows and by other sheets' rows, renamed
-  sheets, rewrites with `expected`, formulas replaced by values, and folding.
+  sheets, rewrites with `expected`, formulas replaced by values, unchanged
+  text that reads a different cell after rows moved, malformed formulas,
+  and folding.
 - [`crates/xldif/tests/objects.rs`](crates/xldif/tests/objects.rs) covers
   formats, layout, and every object kind on `rust_xlsxwriter` output,
   including an inserted row that every object must follow.

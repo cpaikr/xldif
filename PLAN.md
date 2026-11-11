@@ -36,9 +36,10 @@ Status:
 - M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
   with evals on the synthetic demo pair) and a release workflow that builds
   Windows, Linux, and macOS archives when a `v*` tag is pushed.
-- Next action: the maintainer reviews the whole project, then decides the
-  first release. Open items and pending verification are in
-  [TODO.md](TODO.md).
+- The project review (2026-11-11) kept Rust and the own reader and put
+  correctness of the comparison ahead of new features. Its first fixes
+  are in; the rest, in order, is in [TODO.md](TODO.md).
+- Next action: the alignment item in [TODO.md](TODO.md#review-follow-ups).
 
 ## Decisions
 
@@ -53,6 +54,7 @@ Status:
 | JSON style | camelCase fields and dsdai's status words (`same`, `changed`, `onlyBase`, `onlyOther`, plus `moved`) | One vocabulary across the user's tools |
 | Fixtures | Synthetic workbooks written by `rust_xlsxwriter` with explicit formula results, plus hand-made Excel-saved files with invented content | rust_xlsxwriter stores 0 as every formula result unless told otherwise. Shared formulas, threaded comments, dynamic arrays, and real style inheritance only come from Excel |
 | Oracles | openpyxl for values and formulas; Excel COM (`Range.Text`, `DisplayFormat`, colours) on Windows for display strings and effective formats | Independent checks of the reader, not of xldif against itself |
+| Excel's role | A converter for inputs the reader rejects and a test oracle; never the reader | Reviewed 2026-11-11 with Excel on every machine that runs xldif: Excel reads formats one cell at a time through COM, which is far too slow, recalculates on open, and cannot run in CI. The reader's stored values stay the basis of a comparison |
 | Confidentiality | Same rule as dsdai: real workbooks only under git-ignored `fixtures/private/`. Their contents, file names, and derived values never appear in tests, docs, or commits | Real inputs are audit workpapers |
 
 ## Architecture
@@ -138,7 +140,7 @@ Based on dsdai's contract version 1:
 - **Error codes:** dsdai's `file_not_found`, `invalid_archive` (also used for
   bounds violations, as in dsdai), `invalid_xml`, `invalid_argument`,
   `output_exists`, and `io_error`, plus `unsupported_format`, which is new
-  for `.xlsb` and `.xls`.
+  for `.xlsb` and `.xls`, and `internal_error` for a panic.
 - `metadata.contract` starts at 1; new fields are added without removing old
   ones.
 
@@ -310,9 +312,13 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     renamed.
   - Array formulas compare by their anchor text; the spill range itself is
     not compared yet, and dynamic-array metadata is not read.
-  - Unchanged text is a change only when Excel would have widened one of
-    its ranges over inserted rows or columns (a total no longer covering a
-    new line). When the adjustment would only shrink or shift a range, the
+  - Unchanged text is a change when Excel would have widened one of its
+    ranges over inserted rows or columns (a total no longer covering a new
+    line), when a cell it referred to still exists under another address,
+    or when its address now holds a cell that came from another row or
+    column (a deleted row's place taken by the row below). A removed
+    blank row is reported the same way but without `expected`, because the
+    row maps still carry a blank row to the same number. Otherwise the
     unchanged text wins: a row edited in place can align as deleted plus
     inserted, and the formula was not touched.
   - `#REF!` (and `Sheet!#REF!`) from a deleted reference is an adjustment.
@@ -355,7 +361,7 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   `render_html` is.
 - **Layout:** the same as dsdai's report. Generate a public reference with
   `dsd compare` from dsdai's public fixture.
-  - A top bar with summary chips.
+  - A top bar with summary chips, and the comparison's warnings under it.
   - Previous and next change buttons (`N`/`P`/`J`/`K`).
   - A "changes only" toggle, and a details toggle (`I`).
   - A sheet list with a change count per sheet.
