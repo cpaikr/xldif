@@ -392,8 +392,26 @@ pub fn same(a: &[Token], b: &[Token]) -> bool {
 /// it read moved, so unchanged text now reads something else. With the maps
 /// from the other side back to the base side, the same question asks whether
 /// the address the formula reads now was another row or column before.
+///
+/// A range is judged by its ends, and an end that stays inside the range
+/// does not count: rows reordered within a total leave it reading the same
+/// cells.
 pub fn retargets<'a>(tokens: &[Token], this: &SheetMap, sheet: impl Fn(&str) -> Option<&'a SheetMap>) -> bool {
-    let moved = |n: u32, axis: &AxisMap| axis.exact(n).is_some_and(|m| m != n);
+    let row = |p: &Point| match *p {
+        Point::Cell { row, .. } | Point::Row { row, .. } => Some(row),
+        Point::Col { .. } => None,
+    };
+    let col = |p: &Point| match *p {
+        Point::Cell { col, .. } | Point::Col { col, .. } => Some(col),
+        Point::Row { .. } => None,
+    };
+    // Whether an end of the span `a..=b` went outside it. A single reference
+    // is a span of one, so any other number is outside.
+    let leaves = |a: Option<u32>, b: Option<u32>, axis: &AxisMap| {
+        let (Some(a), Some(b)) = (a.or(b), b.or(a)) else { return false };
+        let span = a.min(b)..=a.max(b);
+        [a, b].iter().any(|&n| axis.exact(n).is_some_and(|m| !span.contains(&m)))
+    };
     tokens.iter().any(|t| {
         let Token::Ref(r) = t else { return false };
         let Some(map) = (match &r.sheet {
@@ -402,12 +420,8 @@ pub fn retargets<'a>(tokens: &[Token], this: &SheetMap, sheet: impl Fn(&str) -> 
         }) else {
             return false;
         };
-        let point = |p: &Point| match *p {
-            Point::Cell { row, col, .. } => moved(row, &map.rows) || moved(col, &map.cols),
-            Point::Row { row, .. } => moved(row, &map.rows),
-            Point::Col { col, .. } => moved(col, &map.cols),
-        };
-        point(&r.start) || r.end.as_ref().is_some_and(point)
+        let end = r.end.as_ref().unwrap_or(&r.start);
+        leaves(row(&r.start), row(end), &map.rows) || leaves(col(&r.start), col(end), &map.cols)
     })
 }
 

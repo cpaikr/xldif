@@ -278,3 +278,26 @@ fn unchanged_text_reading_another_sheet_follows_that_sheets_deleted_row() {
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].expected.as_deref(), Some("PL!#REF!"));
 }
+
+#[test]
+fn unchanged_range_over_rows_reordered_inside_it_is_not_a_change() {
+    // A moved from row 2 to row 4. The total still covers the same four
+    // rows; the single reference to B2 now reads B's amount.
+    let base: Grid = &[
+        &["Item", "Amount", "", "=SUM(B2:B5)|10", "=B2|1"],
+        &["Alpha", "1"],
+        &["Bravo", "2"],
+        &["Charlie", "3"],
+        &["Delta", "4"],
+    ];
+    let other: Grid = &[
+        &["Item", "Amount", "", "=SUM(B2:B5)|10", "=B2|2"],
+        &["Bravo", "2"],
+        &["Charlie", "3"],
+        &["Alpha", "1"],
+        &["Delta", "4"],
+    ];
+    let c = run(&[("S", base)], &[("S", other)]);
+    let f = formulas(&c);
+    assert_eq!(f.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s0:formula:E1:E1"], "{f:?}");
+}

@@ -316,7 +316,9 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     ranges over inserted rows or columns (a total no longer covering a new
     line), when a cell it referred to still exists under another address,
     or when its address now holds a cell that came from another row or
-    column (a deleted row's place taken by the row below). A removed
+    column (a deleted row's place taken by the row below). A range is
+    judged by its ends, and an end that stays inside the range does not
+    count: rows reordered within a total leave it unchanged. A removed
     blank row is reported the same way but without `expected`, because the
     row maps still carry a blank row to the same number. Otherwise the
     unchanged text wins: a row edited in place can align as deleted plus
