@@ -49,9 +49,13 @@ the first two.
    that [PLAN.md](PLAN.md#decisions) planned; and an Excel-saved workbook
    with invented content among the public fixtures.
 4. **Smaller defects.**
-   - Built-in number formats 5–8 and 41–44 (currency and accounting) display
-     as General, and `scripts/display_parity.py` counts them as locale
-     skips.
+   - Built-in number formats 37–40 are locale-dependent too, and Excel does
+     not write a code for them when it saves. Korean Excel shows a bare 37
+     as `#,##0;-#,##0` (observed 2026-11-11, with 38–40 alike); xldif shows
+     the ECMA-376 code with parentheses, and names that code as the format
+     property. Found while fixing ids 5–8 and 41–44, which now render as
+     Korean Excel does (`locale_builtin` in
+     [numfmt.rs](crates/xldif/src/numfmt.rs)).
    - With different date systems the raw serials are compared, though
      [PLAN.md](PLAN.md#cell-and-object-comparison) says ISO dates are.
    - [PLAN.md](PLAN.md#architecture)'s module list describes reader parts

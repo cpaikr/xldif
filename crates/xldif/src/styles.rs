@@ -264,7 +264,8 @@ impl Styles {
 
 /// Built-in number formats (ECMA-376 Part 1, 18.8.30) that are the same in
 /// every locale. Ids 5–8, 23–36, and 41–44 vary by locale and are named
-/// `builtin:<id>` rather than guessed.
+/// `builtin:<id>`, so format comparison never depends on a locale; display
+/// gives them a code in `numfmt`.
 fn builtin_number_format(id: u32) -> String {
     let code = match id {
         0 => "General",

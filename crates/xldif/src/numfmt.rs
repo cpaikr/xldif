@@ -12,8 +12,8 @@
 //! and `*` fill characters, which are dropped), padding at the edges (`_x`
 //! and `?` spaces are trimmed from the ends), colors, and locale: `/` is
 //! the date separator as written, and built-in formats whose code depends
-//! on the locale (`builtin:<id>`) show dates in ISO form and numbers as
-//! General.
+//! on the locale (`builtin:<id>`) show dates in ISO form and currency as
+//! Excel does under Korean settings (see `locale_builtin`).
 
 // Short names (v for a value, d for a decimal, n for a count) read best here.
 #![allow(clippy::many_single_char_names)]
@@ -31,8 +31,20 @@ use crate::styles::Styles;
 /// formats (27–36 and 50–58) show dates in ISO form, so they still read as
 /// dates; Excel shows them in the author's locale (observed for id 31
 /// under Korean Excel: `2024년 01월 01일`; US Excel shows 14 as m/d/yyyy;
-/// the other ids are from ECMA-376, unverified). Currency and accounting ids
-/// (5–8, 41–44) show as General.
+/// the other ids are from ECMA-376, unverified).
+///
+/// Currency (5–8) and accounting (41–44) ids have no neutral form: the
+/// file names only the id, and the Excel that opens it supplies the code
+/// from its own regional settings. The codes here are the ones Excel shows
+/// under Korean settings, observed 2026-11-11 by opening a workbook whose
+/// `styles.xml` uses these ids without a `<numFmt>` and reading
+/// `Range.Text` and `NumberFormat`. Saving that workbook from Excel writes
+/// exactly these codes as `<numFmt>` entries, so a workbook Excel saved
+/// carries its own code and never reaches this table; only files from
+/// other writers do. Under other settings Excel shows another currency
+/// symbol and negative style (ECMA-376 lists the US codes, such as
+/// `"$"#,##0_);("$"#,##0)`; not observed here), which the reader cannot
+/// know.
 fn locale_builtin(id: u32) -> &'static str {
     match id {
         // The short date and date-time, which follow the system's short
@@ -41,7 +53,24 @@ fn locale_builtin(id: u32) -> &'static str {
         32 => "hh:mm",
         33 => "hh:mm:ss",
         14 | 27..=36 | 50..=58 => "yyyy-mm-dd",
+        5 => "\"₩\"#,##0;\\-\"₩\"#,##0",
+        6 => "\"₩\"#,##0;[Red]\\-\"₩\"#,##0",
+        7 => "\"₩\"#,##0.00;\\-\"₩\"#,##0.00",
+        8 => "\"₩\"#,##0.00;[Red]\\-\"₩\"#,##0.00",
+        41 => "_-* #,##0_-;\\-* #,##0_-;_-* \"-\"_-;_-@_-",
+        42 => "_-\"₩\"* #,##0_-;\\-\"₩\"* #,##0_-;_-\"₩\"* \"-\"_-;_-@_-",
+        43 => "_-* #,##0.00_-;\\-* #,##0.00_-;_-* \"-\"??_-;_-@_-",
+        44 => "_-\"₩\"* #,##0.00_-;\\-\"₩\"* #,##0.00_-;_-\"₩\"* \"-\"??_-;_-@_-",
         _ => "General",
+    }
+}
+
+/// The code a format renders with: `code` itself, or the stand-in for a
+/// `builtin:<id>` name.
+pub fn rendered_code(code: &str) -> &str {
+    match code.strip_prefix("builtin:") {
+        Some(id) => locale_builtin(id.parse().unwrap_or(0)),
+        None => code,
     }
 }
 
@@ -189,8 +218,8 @@ impl Format {
         if code.trim().is_empty() || code.chars().count() > MAX_CODE_CHARS {
             return Format::parse("General");
         }
-        if let Some(id) = code.strip_prefix("builtin:") {
-            return Format::parse(locale_builtin(id.parse().unwrap_or(0)));
+        if code.starts_with("builtin:") {
+            return Format::parse(rendered_code(code));
         }
         let mut sections: Vec<Section> = split_sections(code).iter().map(|s| parse_section(s)).collect();
         // The fourth section, or a section with `@`, formats text.
@@ -1355,7 +1384,38 @@ mod tests {
         assert_eq!(show("yyyy-mm-dd", -1.0), "########");
         assert_eq!(show("builtin:31", 45_292.0), "2024-01-01");
         assert_eq!(Format::parse("builtin:31").iso_date(45_292.0, false).as_deref(), Some("2024-01-01"));
-        assert_eq!(show("builtin:42", 1234.0), "1234");
+    }
+
+    /// Currency and accounting built-ins, as Korean Excel shows them
+    /// (`Range.Text` with `*` fill and edge padding removed).
+    #[test]
+    fn currency_builtins() {
+        for (id, v, want) in [
+            (5, 1234.5, "₩1,235"),
+            (5, -1234.5, "-₩1,235"),
+            (5, -0.4, "-₩0"),
+            (6, -1234.5, "-₩1,235"),
+            (7, 1234.5, "₩1,234.50"),
+            (7, -0.4, "-₩0.40"),
+            (8, 0.0, "₩0.00"),
+            (41, 1234.5, "1,235"),
+            (41, -1234.5, "-1,235"),
+            (41, 0.0, "-"),
+            (42, 1234.5, "₩1,235"),
+            (42, -1234.5, "-₩1,235"),
+            (42, 0.0, "₩-"),
+            (43, -1234.5, "-1,234.50"),
+            (43, 0.0, "-"),
+            (44, 1234.5, "₩1,234.50"),
+            (44, 0.4, "₩0.40"),
+        ] {
+            assert_eq!(show(&format!("builtin:{id}"), v), want, "builtin {id} {v}");
+        }
+        assert_eq!(Format::parse("builtin:44").display(&Value::Text("text".into()), false), "text");
+        assert_eq!(rendered_code("builtin:5"), "\"₩\"#,##0;\\-\"₩\"#,##0");
+        assert_eq!(rendered_code("0.00"), "0.00");
+        // An id this table does not know still shows as General.
+        assert_eq!(show("builtin:23", 1234.0), "1234");
     }
 
     #[test]

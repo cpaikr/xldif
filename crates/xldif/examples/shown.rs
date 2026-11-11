@@ -1,5 +1,6 @@
 //! Prints every valued cell of a workbook as one JSON line: sheet, cell,
-//! number format code, and the text xldif says Excel shows. Used by
+//! number format (and the code it renders with, which differs for a
+//! `builtin:<id>` name), and the text xldif says Excel shows. Used by
 //! `scripts/display_parity.py` to check display text against Excel.
 //!
 //! `cargo run -p xldif --example shown -- FILE`
@@ -20,10 +21,12 @@ fn main() {
             if cell.value == Value::Empty {
                 continue;
             }
+            let format = book.styles.display_number_format(cell.style);
             let line = serde_json::json!({
                 "sheet": sheet.name,
                 "cell": cell_name(row, cell.col),
-                "format": book.styles.display_number_format(cell.style),
+                "code": xldif::numfmt::rendered_code(&format),
+                "format": format,
                 "text": formats.shown(cell.style, &cell.value),
                 "date": formats.get(cell.style).is_date(),
             });

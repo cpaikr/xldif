@@ -115,8 +115,14 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   context labels, change folding, and the summary.
 - **`numfmt`:** an Excel number-format renderer for display strings,
   covering sections, conditions, dates and times, fractions, scientific
-  notation, and literal text. Every code renders; built-in codes that
-  depend on the locale show dates in ISO form and numbers as General.
+  notation, and literal text. Every code renders. Built-in ids whose code
+  depends on the locale show dates in ISO form. The currency and accounting
+  ids (5–8, 41–44) show as Excel does under Korean regional settings (`₩`,
+  a leading minus), observed in Excel on 2026-11-11 for a workbook that
+  names the ids without a code; Excel writes the code itself when it saves,
+  so only files from other writers depend on this. What Excel shows under
+  other regional settings (ECMA-376 lists `$` and parentheses for the US)
+  is not observed and not reproduced.
   Column width (`####`), `*` fill, edge padding, colors, and the locale's
   date separator are not reproduced. Display strings are a convenience
   only: comparisons use typed values. Rules that could only be learned from

@@ -227,3 +227,24 @@ fn a_workbook_the_model_holds_entirely_has_no_such_warning() {
         assert!(book.warnings.iter().all(|w| w.code != "not_compared"), "{:?}", book.warnings);
     }
 }
+
+/// A writer other than Excel can name a currency built-in by id alone.
+/// Display then uses the code Korean Excel supplies, while the format
+/// property keeps the id, which is all the file says.
+#[test]
+fn a_built_in_currency_format_without_a_code_shows_as_currency() {
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let styles = format!(
+        r#"<styleSheet xmlns="{main}"><cellXfs count="3"><xf numFmtId="0"/><xf numFmtId="5" applyNumberFormat="1"/><xf numFmtId="43" applyNumberFormat="1"/></cellXfs></styleSheet>"#
+    );
+    let bytes = RawBook::new()
+        .workbook_rel("styles", "styles.xml")
+        .part("xl/styles.xml", styles.as_bytes())
+        .sheet("S", r#"<row r="1"><c r="A1" s="1"><v>-1234.5</v></c><c r="B1" s="2"><v>1234.5</v></c></row>"#)
+        .build();
+    let book = read_bytes(bytes).unwrap();
+    let cells = xldif::views::cells(&book, book.sheet("S").unwrap(), None, None).cells;
+    assert_eq!(cells[0].display.as_deref(), Some("-₩1,235"));
+    assert_eq!(cells[1].display.as_deref(), Some("1,234.50"));
+    assert_eq!(book.styles.format(1).number_format, "builtin:5");
+}
