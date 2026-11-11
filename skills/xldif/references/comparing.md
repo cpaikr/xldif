@@ -60,12 +60,13 @@ are not changes.
   that moved into that address.
 - A formula names another workbook by number (`[1]Prices!A1`), and the
   number is only a position in that workbook's list of links: xldif
-  compares the files, so a renumbered link is not a change. A formula
-  change with the same text on both sides and a file name in `expected`
-  (`[FY2024.xlsx]Sheet1!A1`) reads another file now; the `externalLink`
-  change whose id carries that number (`externalLink:1:1`) names both
-  files, and `xldif inspect BOOK` lists each workbook's links in order.
-  Report it as the source file changing, once, not formula by formula.
+  compares the files, so a renumbered link is not a change. A link
+  pointed at another file is one `externalLink` change that names both
+  files (`externalLink:1:1`); the formulas through it are not listed, and
+  every one of them reads the new file. Say so when reporting it.
+  `xldif inspect BOOK` lists each workbook's links in order. A file name
+  in a formula's `expected` (`[FY2024.xlsx]Sheet1!A1`) means the other
+  workbook no longer links to that file at all.
 - Moved rows are not changes in content; mention them only when order
   matters.
 - Format-only changes are rarely material; summarize them unless asked.

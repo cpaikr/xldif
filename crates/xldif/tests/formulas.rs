@@ -368,21 +368,23 @@ fn a_renumbered_external_link_is_not_a_formula_change() {
 }
 
 #[test]
-fn one_link_number_naming_two_files_is_a_change() {
-    // The same formula text on both sides, reading another file.
+fn a_link_pointed_at_another_file_is_one_change() {
+    // The same formula text on both sides, reading another file: the link
+    // is the change, not each formula through it.
     let rows: &[(&str, &str, f64)] = &[("Opening", "[1]Sheet1!A1", 10.0), ("Closing", "[1]Sheet1!A2+1", 12.0)];
     let base = linked_book(&["FY2024.xlsx"], rows, "Summary!$B$1");
     let other = linked_book(&["FY2025.xlsx"], rows, "Summary!$B$1");
     let c = compare_books(&base, &other);
     assert_eq!(objects(&c), ["externalLink:1:1 Changed FY2024.xlsx→FY2025.xlsx"]);
     assert_eq!(c.objects[0].properties[0].name, "target");
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+    // A link removed outright leaves its formulas reading a file the other
+    // workbook has no number for: those are listed, with the file named.
+    let removed = linked_book(&[], &[("Opening", "A5", 10.0), ("Closing", "A6+1", 12.0)], "Summary!$B$1");
+    let c = compare_books(&base, &removed);
+    assert_eq!(objects(&c), ["externalLink:1:- OnlyBase FY2024.xlsx→"]);
     let f = formulas(&c);
-    assert_eq!(f.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s0:formula:B1:B1", "s0:formula:B2:B2"]);
-    assert_eq!(f[0].status, Status::Changed);
-    assert_eq!(f[0].base.as_ref().unwrap().formula.as_deref(), Some("[1]Sheet1!A1"));
-    assert_eq!(f[0].other.as_ref().unwrap().formula.as_deref(), Some("[1]Sheet1!A1"));
-    // The base formula in the other workbook's terms: it has no number
-    // there for the base file, so the file is named.
+    assert_eq!(f.len(), 2, "{f:?}");
     assert_eq!(f[0].expected.as_deref(), Some("[FY2024.xlsx]Sheet1!A1"));
     // The same workbook against itself still has nothing to report.
     let same = compare_books(&base, &base);

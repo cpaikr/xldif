@@ -181,8 +181,8 @@ fn external_links_are_listed_and_compared_by_the_file_they_name() {
     assert_eq!((link["kind"].clone(), link["status"].clone()), ("externalLink".into(), "onlyOther".into()));
     assert_eq!(link["other"]["text"], "Budget.xlsx");
 
-    // The same number for another file is: the link, and the formula
-    // through it, whose text did not change.
+    // The same number for another file is one change, the link's; the
+    // formula through it, whose text did not change, is not listed.
     let env = ok(&xldif(["compare", s(&base), s(&repointed)]), "compare");
     let r = &env["result"];
     assert_eq!(r["objects"][0]["id"], "externalLink:1:1");
@@ -191,18 +191,10 @@ fn external_links_are_listed_and_compared_by_the_file_they_name() {
         r["objects"][0]["properties"][0],
         serde_json::json!({"name": "target", "base": "FY2024.xlsx", "other": "FY2025.xlsx"})
     );
-    let formula = &r["sheets"][0]["changes"][0];
-    assert_eq!((formula["kind"].clone(), formula["status"].clone()), ("formula".into(), "changed".into()));
-    assert_eq!(formula["base"]["formula"], formula["other"]["formula"]);
-    assert_eq!(formula["expected"], "[FY2024.xlsx]Sheet1!A1");
+    assert_eq!(r["summary"]["formula"], 0);
     let text = xldif(["compare", s(&base), s(&repointed), "--format", "text"]);
     assert!(
         text.stdout.contains("externalLink:1:1\texternalLink\tchanged\t-→-\ttarget: FY2024.xlsx → FY2025.xlsx\n"),
-        "{}",
-        text.stdout
-    );
-    assert!(
-        text.stdout.contains("=[1]Sheet1!A1 → =[1]Sheet1!A1 (expected =[FY2024.xlsx]Sheet1!A1)"),
         "{}",
         text.stdout
     );
@@ -210,7 +202,6 @@ fn external_links_are_listed_and_compared_by_the_file_they_name() {
     // The kind filters like any other.
     let env = ok(&xldif(["compare", s(&base), s(&repointed), "--kind", "external-link"]), "compare");
     assert_eq!(env["result"]["objects"].as_array().unwrap().len(), 1);
-    assert_eq!(env["result"]["sheets"][0]["changes"].as_array().map(Vec::len), Some(0));
     let env = ok(&xldif(["compare", s(&base), s(&repointed), "--kind", "formula"]), "compare");
     assert_eq!(env["result"]["objects"].as_array().unwrap().len(), 0);
 

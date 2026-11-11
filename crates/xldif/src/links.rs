@@ -5,8 +5,12 @@
 //! says nothing by itself: adding or removing a link renumbers the others.
 //! So links pair by the file they name, and a base formula is read in the
 //! other workbook's numbering before it is compared: `[2]` on one side and
-//! `[1]` on the other are the same reference when both name `Prices.xlsx`,
-//! and `[1]` on both sides is not when the files differ.
+//! `[1]` on the other are the same reference when both name `Prices.xlsx`.
+//!
+//! A link pointed at another file (last year's trial balance replaced by
+//! this year's) is one change to the link. The formulas through it are not
+//! listed one by one: their text did not change, and the link's change says
+//! what they all read now.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -33,17 +37,30 @@ pub fn pair(base: &[String], other: &[String]) -> Vec<Option<usize>> {
         .collect()
 }
 
+/// For each base link that names a file the other workbook does not link
+/// to: the other workbook's link at the same position, when that one names
+/// a file the base does not link to either. The link was pointed at
+/// another file.
+fn repointed(base: &[String], other: &[String], paired: &[Option<usize>]) -> Vec<Option<usize>> {
+    let mut other_paired = vec![false; other.len()];
+    for &j in paired.iter().flatten() {
+        other_paired[j] = true;
+    }
+    (0..base.len()).map(|i| (paired[i].is_none() && i < other.len() && !other_paired[i]).then_some(i)).collect()
+}
+
 /// Changes to the links themselves, for the workbook-level list. A file
 /// linked on one side only is `onlyBase` or `onlyOther`; where both sides
 /// have such a link at the same position, the link was pointed at another
 /// file and is one `changed`. The same file at another position is not a
 /// change. Ids carry the positions formulas use
-/// (`externalLink:<base>:<other>`), so `[1]` in a listed formula can be
-/// looked up here.
+/// (`externalLink:<base>:<other>`), so `[1]` in a formula can be looked up
+/// here.
 pub fn changes(base: &[String], other: &[String]) -> Vec<Change> {
     let paired = pair(base, other);
+    let repointed = repointed(base, other, &paired);
     let mut other_done = vec![false; other.len()];
-    for &j in paired.iter().flatten() {
+    for &j in paired.iter().chain(&repointed).flatten() {
         other_done[j] = true;
     }
     let shown = |target: &str| if target.is_empty() { "(no workbook file)".to_owned() } else { target.to_owned() };
@@ -71,11 +88,7 @@ pub fn changes(base: &[String], other: &[String]) -> Vec<Change> {
     };
     let mut out = Vec::new();
     for i in (0..base.len()).filter(|&i| paired[i].is_none()) {
-        let repointed = (i < other.len() && !other_done[i]).then_some(i);
-        if let Some(j) = repointed {
-            other_done[j] = true;
-        }
-        out.push(change(Some(i), repointed));
+        out.push(change(Some(i), repointed[i]));
     }
     out.extend((0..other.len()).filter(|&j| !other_done[j]).map(|j| change(None, Some(j))));
     out
@@ -92,11 +105,16 @@ pub struct LinkMap {
 
 impl LinkMap {
     pub fn new(base: &[String], other: &[String]) -> Self {
-        let names: Vec<String> = pair(base, other)
-            .into_iter()
+        let paired = pair(base, other);
+        let repointed = repointed(base, other, &paired);
+        let names: Vec<String> = paired
+            .iter()
+            .zip(&repointed)
             .zip(base)
             .enumerate()
-            .map(|(i, (paired, target))| match paired {
+            // A link pointed at another file keeps its number: the change
+            // is the link's, reported once, not each formula's through it.
+            .map(|(i, ((paired, repointed), target))| match paired.or(*repointed) {
                 Some(j) => (j + 1).to_string(),
                 // The other workbook has no link to this file, so no index
                 // there can mean it: the file's name stands in, as Excel
@@ -182,6 +200,9 @@ mod tests {
     fn a_formula_is_read_in_the_other_workbooks_numbering() {
         let map =
             LinkMap::new(&links(&["Prices.xlsx", "Rates.xlsx", "Old.xlsx"]), &links(&["Rates.xlsx", "Prices.xlsx"]));
+        // A link pointed at another file keeps its number.
+        let moved = LinkMap::new(&links(&["FY2024.xlsx"]), &links(&["FY2025.xlsx"]));
+        assert!(moved.relink(&tokenize("[1]Sheet1!A1")).is_none());
         assert_eq!(relinked(&map, "[1]Prices!A1*[2]Rates!$B$2"), "[2]Prices!A1*[1]Rates!$B$2");
         assert_eq!(relinked(&map, "'[1]Price list'!A1"), "'[2]Price list'!A1");
         assert_eq!(relinked(&map, "[2]!Rate+[1]Jan:Dec!B5"), "[1]!Rate+[2]Jan:Dec!B5");
@@ -225,7 +246,7 @@ mod tests {
 
     #[test]
     fn a_file_named_like_an_index_cannot_pass_for_one() {
-        let map = LinkMap::new(&links(&["2", ""]), &links(&["Other.xlsx"]));
-        assert_eq!(relinked(&map, "[1]S!A1+[2]S!A1"), "[./2]S!A1+[?2]S!A1");
+        let map = LinkMap::new(&links(&["A.xlsx", "2", ""]), &links(&["A.xlsx"]));
+        assert_eq!(relinked(&map, "[2]S!A1+[3]S!A1"), "[./2]S!A1+[?3]S!A1");
     }
 }

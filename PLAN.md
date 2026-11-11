@@ -360,8 +360,10 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     the number, which is only a position in each workbook's list of links.
     Links pair by target (without case); the base formula is read in the
     other workbook's numbering, so `[1]` against `[2]` for one file is no
-    change, and `[1]` against `[1]` for two files is one. A file the other
-    workbook does not link to is written by name in `expected`
+    change. A link pointed at another file (`[1]` naming last year's file
+    on one side and this year's on the other) is one `externalLink` change;
+    the formulas through it are not listed one by one. A file the other
+    workbook does not link to at all is written by name in `expected`
     (`[FY2024.xlsx]Sheet1!A1`), since no number there means it. This covers
     cell formulas and defined names, including external names
     (`[1]!Rate`); validation and conditional-format formulas still compare
