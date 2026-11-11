@@ -34,8 +34,11 @@ whose report goes to the file while stdout carries the JSON envelope. Exit 0 mea
 `error.code`, `error.message`, and often `error.hint`; 2 is an invalid
 invocation. Read `warnings` before reporting: values are the results Excel
 last saved, and a warning says when they may be stale (manual calculation,
-recalculate-on-open, formulas without a stored result) or when the two files
-use different date systems.
+recalculate-on-open, formulas without a stored result), when the two files
+use different date systems, when a file is open in Excel
+(`open_in_another_program`: what was read is the last saved state), or when
+it was read through a copy Excel made (`converted_by_excel`,
+`unsaved_state`).
 
 ## Route the task
 
