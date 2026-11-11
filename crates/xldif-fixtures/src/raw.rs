@@ -15,11 +15,13 @@ pub const MAIN_NS: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/
 
 /// A workbook built part by part. Sheets are numbered in order from 1.
 pub struct RawBook {
-    sheets: Vec<(String, Option<&'static str>, String)>,
+    /// Name, `state`, part XML, and relationship kind.
+    sheets: Vec<(String, Option<&'static str>, String, &'static str)>,
     shared_strings: Option<String>,
     workbook_before: String,
     workbook_after: String,
     workbook_type: &'static str,
+    workbook_rels: String,
     extra_parts: Vec<(String, Vec<u8>)>,
 }
 
@@ -37,6 +39,7 @@ impl RawBook {
             workbook_before: String::new(),
             workbook_after: String::new(),
             workbook_type: WORKBOOK_TYPE,
+            workbook_rels: String::new(),
             extra_parts: Vec::new(),
         }
     }
@@ -50,14 +53,33 @@ impl RawBook {
     #[must_use]
     pub fn sheet_with_state(mut self, name: &str, state: Option<&'static str>, rows_xml: &str) -> Self {
         let xml = format!(r#"<worksheet xmlns="{MAIN_NS}"><sheetData>{rows_xml}</sheetData></worksheet>"#);
-        self.sheets.push((name.to_owned(), state, xml));
+        self.sheets.push((name.to_owned(), state, xml, "worksheet"));
+        self
+    }
+
+    /// Adds a relationship from the workbook part, such as `externalLink`;
+    /// the target part itself is added with [`Self::part`] when it matters.
+    #[must_use]
+    pub fn workbook_rel(mut self, kind: &str, target: &str) -> Self {
+        let n = self.workbook_rels.matches("<Relationship ").count() + 1;
+        let _ = write!(self.workbook_rels, r#"<Relationship Id="rIdX{n}" Type="{REL}/{kind}" Target="{target}"/>"#);
         self
     }
 
     /// Adds a sheet whose whole part is `xml`, as written.
     #[must_use]
     pub fn sheet_part(mut self, name: &str, xml: &str) -> Self {
-        self.sheets.push((name.to_owned(), None, xml.to_owned()));
+        self.sheets.push((name.to_owned(), None, xml.to_owned(), "worksheet"));
+        self
+    }
+
+    /// Adds a chart sheet: a sheet entry whose part holds a chart, no cells.
+    #[must_use]
+    pub fn chartsheet(mut self, name: &str) -> Self {
+        let xml = format!(
+            r#"<chartsheet xmlns="{MAIN_NS}"><sheetViews><sheetView workbookViewId="0"/></sheetViews></chartsheet>"#
+        );
+        self.sheets.push((name.to_owned(), None, xml, "chartsheet"));
         self
     }
 
@@ -104,12 +126,11 @@ impl RawBook {
             String::from(r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#);
         let mut sheets = String::new();
         let mut parts: Vec<(String, Vec<u8>)> = Vec::new();
-        for (i, (name, state, xml)) in self.sheets.iter().enumerate() {
+        for (i, (name, state, xml, kind)) in self.sheets.iter().enumerate() {
             let n = i + 1;
             let state = state.map(|s| format!(r#" state="{s}""#)).unwrap_or_default();
             let _ = write!(sheets, r#"<sheet name="{name}" sheetId="{n}"{state} r:id="rId{n}"/>"#);
-            let _ =
-                write!(rels, r#"<Relationship Id="rId{n}" Type="{REL}/worksheet" Target="worksheets/sheet{n}.xml"/>"#);
+            let _ = write!(rels, r#"<Relationship Id="rId{n}" Type="{REL}/{kind}" Target="worksheets/sheet{n}.xml"/>"#);
             let _ = write!(types, r#"<Override PartName="/xl/worksheets/sheet{n}.xml" ContentType="{SHEET_TYPE}"/>"#);
             parts.push((format!("xl/worksheets/sheet{n}.xml"), xml.as_bytes().to_vec()));
         }
@@ -118,6 +139,7 @@ impl RawBook {
             let _ = write!(types, r#"<Override PartName="/xl/sharedStrings.xml" ContentType="{SST_TYPE}"/>"#);
             parts.push(("xl/sharedStrings.xml".to_owned(), sst.as_bytes().to_vec()));
         }
+        rels.push_str(&self.workbook_rels);
         rels.push_str("</Relationships>");
         types.push_str("</Types>");
         let (before, after) = (&self.workbook_before, &self.workbook_after);

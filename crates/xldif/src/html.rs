@@ -415,6 +415,9 @@ body{margin:0;display:flex;flex-direction:column;overflow:hidden;background:var(
 .bar{display:flex;flex-wrap:wrap;align-items:center;gap:6px 16px;padding:6px 12px;background:var(--paper);border-bottom:1px solid var(--line)}
 .bar h1{font-size:15px;margin:0}
 .chips span{display:inline-block;margin-right:6px;padding:1px 8px;border-radius:10px;background:var(--bg);font-size:12px}
+.warn{flex:none;max-height:7.5em;overflow:auto;padding:4px 12px;background:#fff7e0;border-bottom:1px solid var(--line);font-size:12px}
+.warn p{margin:0}
+.warn b{margin-right:6px;color:#92400e}
 .ctl{display:flex;flex-wrap:wrap;align-items:center;gap:4px}
 .ctl button,.ctl label{font:inherit;font-size:12px;padding:3px 10px;border:1px solid var(--line);border-radius:6px;background:var(--paper);color:var(--ink);cursor:pointer}
 .ctl button:hover,.ctl label:hover{border-color:var(--accent)}
@@ -612,7 +615,10 @@ const SCRIPT: &str = r#"
 /// The report for a comparison of `base` and `other`: every sheet and
 /// change in `cmp` (the caller chooses its filters; a limit would hide
 /// changes from the report).
-pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook) -> String {
+///
+/// `warnings` are the comparison's, shown under the header: a reader of the
+/// report has no envelope to find them in.
+pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &[crate::model::Warning]) -> String {
     let mut out = String::with_capacity(1 << 16);
     let title = format!("{} ↔ {}", cmp.base.file, cmp.other.file);
     let _ = write!(
@@ -638,6 +644,14 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook) -> String {
     }
     out.push_str("</div><div class=\"ctl\"><button id=\"prev\" title=\"previous change (p or k)\"><kbd>P</kbd>◀ prev</button><span id=\"at\"></span><button id=\"next\" title=\"next change (n or j)\">next ▶<kbd>N</kbd></button><label><input type=\"checkbox\" id=\"only\" checked> changes only</label><button id=\"tocbtn\">sheets</button><button id=\"infobtn\" title=\"show or hide details (i)\">details<kbd>I</kbd></button></div>");
     out.push_str("<div class=\"legend\"><span><i style=\"background:var(--del)\"></i>base / removed</span><span><i style=\"background:var(--ins)\"></i>other / added</span><span><i style=\"background:var(--mov)\"></i>moved</span><span><i style=\"box-shadow:inset 0 0 0 2px var(--fx)\"></i>formula</span><span><i style=\"outline:1px dashed #b45309\"></i>format</span></div></div>");
+
+    if !warnings.is_empty() {
+        out.push_str("<div class=\"warn\">");
+        for w in warnings {
+            let _ = write!(out, "<p><b>{}</b> {}</p>", esc(w.code), esc(&w.message));
+        }
+        out.push_str("</div>");
+    }
 
     out.push_str("<div class=\"main\"><nav id=\"toc\">");
     for sheet in &cmp.sheets {
