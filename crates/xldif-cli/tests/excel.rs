@@ -192,3 +192,28 @@ fn a_workbook_open_in_excel_is_read_as_saved_unless_unsaved_is_asked() {
     drop(held);
     assert_eq!(std::fs::read(&open).unwrap(), on_disk, "the open workbook is unchanged on disk");
 }
+
+#[test]
+fn an_unsaved_edit_in_a_workbook_that_is_read_only_on_disk_is_read() {
+    if !excel_tests_enabled() {
+        return;
+    }
+    // Excel opens such a file read-only and takes no lock on it, so nothing
+    // on disk says it is open; `--unsaved` must ask Excel all the same.
+    let work = Work::new("readonly");
+    let (base, open) = (work.basic("base.xlsx"), work.basic("open.xlsx"));
+    let read_only = |on: bool| {
+        let mut permissions = std::fs::metadata(&open).unwrap().permissions();
+        permissions.set_readonly(on);
+        std::fs::set_permissions(&open, permissions).unwrap();
+    };
+    read_only(true);
+    let held = Held::open(&work, &open);
+    let env = ok(&["compare", s(&base), s(&open), "--unsaved", "--kind", "value"]);
+    drop(held);
+    // Writable again, so the scratch directory can be removed.
+    read_only(false);
+    assert!(warning_codes(&env).contains(&"unsaved_state"), "{:?}", env["warnings"]);
+    // The edit, the total it feeds, and the other sheet's reference to that.
+    assert_eq!(env["result"]["summary"]["value"], 3, "{}", env["result"]["summary"]);
+}

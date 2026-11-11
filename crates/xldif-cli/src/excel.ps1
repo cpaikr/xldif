@@ -92,9 +92,10 @@ try {
     # UpdateLinks 0, ReadOnly; a wrong or missing password fails instead of asking.
     $wb = $xl.Workbooks.Open($in, 0, $true, $missing, $password)
     # Excel opens nearly any file, as text if nothing else. Only its own
-    # workbook formats count: .xlsx 51, .xlsm 52, .xlsb 50, .xls 56 and
-    # -4143, and the older .xls of Excel 5 and 95 (39, 43).
-    if (@(51, 52, 50, 56, -4143, 39, 43) -notcontains [int]$wb.FileFormat) {
+    # workbook formats count: .xlsx 51 and its Strict form 61, .xlsm 52,
+    # .xlsb 50, .xls 56 and -4143, and the older .xls of Excel 5 and 95
+    # (39, 43).
+    if (@(51, 61, 52, 50, 56, -4143, 39, 43) -notcontains [int]$wb.FileFormat) {
         Fail 'failed' 'Excel does not read it as a workbook'
     }
     # 51 is .xlsx; the copy carries no password.

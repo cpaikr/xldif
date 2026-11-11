@@ -151,40 +151,46 @@ pub fn read(path: &Path, unsaved: bool) -> Result<Workbook, Failure> {
     let mut notes = Vec::new();
     let mut scratch = None;
     let mut source = path.to_path_buf();
-    if in_use(path) {
-        if unsaved {
-            let dir = Scratch::new()?;
-            // The copy keeps the workbook's format, so its extension too.
-            let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("xlsx");
-            let copy = dir.0.join(format!("open.{extension}"));
-            let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
-            if let Err(refusal) = excel("snapshot", &full, &copy, &dir) {
-                return Err(if refusal.not_open {
-                    Failure::excel(
-                        format!(
-                            "{} is open in another program, but no running Excel has it open under this path",
-                            path.display()
-                        ),
-                        "a workbook opened from OneDrive or SharePoint is known to Excel by its web address: save a \
-                         local copy and compare that, or drop --unsaved to read the last saved state",
-                    )
-                } else {
-                    Failure::excel(
-                        format!("Excel could not hand over {} as it is open now: {}", path.display(), refusal.message),
-                        "drop --unsaved to read the last saved state",
-                    )
-                });
+    // Another program holding the file open and refusing writers is the
+    // sign of a workbook open in Excel; it is not proof either way (a file
+    // that is read-only on disk never shows it), so `--unsaved` asks Excel
+    // whatever it says.
+    let held = in_use(path);
+    if unsaved && cfg!(windows) {
+        let dir = Scratch::new()?;
+        // The copy keeps the workbook's format, so its extension too.
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("xlsx");
+        let copy = dir.0.join(format!("open.{extension}"));
+        let full = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        match excel("snapshot", &full, &copy, &dir) {
+            Ok(()) => {
+                source = copy;
+                scratch = Some(dir);
+                notes.push(note("unsaved_state", "read as Excel has it open now, unsaved edits included"));
             }
-            source = copy;
-            scratch = Some(dir);
-            notes.push(note("unsaved_state", "read as Excel has it open now, unsaved edits included"));
-        } else {
-            notes.push(note(
-                "open_in_another_program",
-                "the file is open in another program, probably Excel; this is its last saved state (pass \
-                 --unsaved to read what Excel has now)",
-            ));
+            // Nobody has it open: the file on disk is all there is.
+            Err(refusal) if refusal.not_open && !held => {}
+            Err(refusal) if refusal.not_open => {
+                return Err(Failure::excel(
+                    format!(
+                        "{} is open in another program, but no running Excel has it open under this path",
+                        path.display()
+                    ),
+                    "a workbook opened from OneDrive or SharePoint is known to Excel by its web address: save a                      local copy and compare that, or drop --unsaved to read the last saved state",
+                ));
+            }
+            Err(refusal) => {
+                return Err(Failure::excel(
+                    format!("Excel could not hand over {} as it is open now: {}", path.display(), refusal.message),
+                    "drop --unsaved to read the last saved state",
+                ));
+            }
         }
+    } else if held {
+        notes.push(note(
+            "open_in_another_program",
+            "the file is open in another program, probably Excel; this is its last saved state (pass --unsaved to              read what Excel has now)",
+        ));
     }
     let mut book = match xldif::read_path(&source) {
         Ok(book) => book,
