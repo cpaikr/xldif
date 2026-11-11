@@ -50,7 +50,11 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   it chooses commands, reads envelopes, and owns what to report.
 - [`crates/xldif-cli`](crates/xldif-cli/src/main.rs) parses arguments (clap),
   runs one command, and writes one stdout document
-  ([envelope.rs](crates/xldif-cli/src/envelope.rs)).
+  ([envelope.rs](crates/xldif-cli/src/envelope.rs)). It also owns the one
+  place xldif starts another program
+  ([excel.rs](crates/xldif-cli/src/excel.rs), with the PowerShell script
+  beside it): having Excel save a copy of a workbook the reader rejects, or
+  of a workbook as Excel has it open.
 - [`crates/xldif-fixtures`](crates/xldif-fixtures/src/lib.rs) writes synthetic
   workbooks with `rust_xlsxwriter` for tests. No shipped crate depends on it.
 
@@ -67,6 +71,17 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   no evidence to split it, is paired from its ends, searched only near its
   diagonal, or paired by position, each with an `alignment_fallback`
   warning: the best alignment may have been missed.
+- **Excel converts; it never reads.** Where a workbook reaches the reader
+  only through Excel, Excel saves a copy and that copy goes through the same
+  reader as any other file, in a scratch directory removed before the
+  command returns. A warning names the route (`converted_by_excel`,
+  `unsaved_state`), because Excel recalculates on opening and rewrites
+  fonts. An open workbook is looked up among the objects running programs
+  have registered and copied with `SaveCopyAs`; it is never saved, closed,
+  or loaded by xldif. Excel is asked for a conversion only when the reader
+  has already rejected the file as a compound or binary workbook, and the
+  copy is refused unless Excel reports one of its own workbook formats: it
+  would otherwise open any file as text.
 - **Deterministic results.** Content hashes are fixed (FNV-1a) and every
   alignment tie breaks by index, so the same inputs always give the same
   changes and ids. Change ids derive from locations, never from list order.
@@ -101,7 +116,8 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
   always JSON. stderr stays empty.
 - Exit 0 means `ok: true`; 1 is an execution failure with a stable
   `error.code` (`file_not_found`, `invalid_archive`, `unsupported_format`,
-  `invalid_xml`, `invalid_argument`, `output_exists`, `io_error`, and
+  `invalid_xml`, `invalid_argument`, `output_exists`, `io_error`,
+  `excel_failed` when Excel would not hand over an open workbook, and
   `internal_error` for a panic, which is a bug); 2 is an invalid invocation
   (`invalid_invocation`).
 - Bare `xldif` prints exactly `xldif --help`.
@@ -114,6 +130,17 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`crates/xldif/tests/reader.rs`](crates/xldif/tests/reader.rs) reads
   synthetic workbooks, including hand-assembled parts in shapes writer
   libraries never produce.
+- [`crates/xldif/tests/excel_saved.rs`](crates/xldif/tests/excel_saved.rs)
+  reads `fixtures/excel/`: one invented workbook that Excel built and saved,
+  in the usual format and as Strict Open XML
+  ([`scripts/excel_fixture.py`](scripts/excel_fixture.py)). Its assertions
+  are the file-format facts observed in Excel's own output.
+- [`crates/xldif-cli/tests/excel.rs`](crates/xldif-cli/tests/excel.rs)
+  drives Excel: a `.xls` and a `.xlsb` come back with the figures they were
+  saved from, and a workbook held open with an unsaved edit reads as saved,
+  or with the edit under `--unsaved`, and is byte-for-byte unchanged on disk
+  afterwards. It runs only with `XLDIF_TEST_EXCEL=1`, which
+  `scripts/check.py` sets where Excel is installed.
 - [`scripts/parity.py`](scripts/parity.py) compares every cell's value and
   formula with openpyxl, an independent reader, and counts the known,
   intended differences it skips.

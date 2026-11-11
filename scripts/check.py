@@ -15,6 +15,7 @@ workbooks or prints their contents.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -74,13 +75,24 @@ def check_skill(skill: Path) -> None:
     print(f"ok   package {skill.name}")
 
 
+def excel_installed() -> bool:
+    """Whether Excel's automation class is registered (Windows only)."""
+    if sys.platform != "win32":
+        return False
+    query = ["reg", "query", r"HKCR\Excel.Application"]
+    return subprocess.run(query, capture_output=True).returncode == 0
+
+
 def run_cargo() -> None:
+    # The tests that drive Excel (conversion, open workbooks) run only where
+    # it is installed: crates/xldif-cli/tests/excel.rs.
+    env = {**os.environ, "XLDIF_TEST_EXCEL": "1"} if excel_installed() else None
     for args in (
         ["fmt", "--all", "--check"],
         ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"],
         ["test", "--workspace", "--locked"],
     ):
-        proc = subprocess.run(["cargo", *args], cwd=ROOT)
+        proc = subprocess.run(["cargo", *args], cwd=ROOT, env=env)
         if proc.returncode != 0:
             fail(f"cargo {args[0]}")
         else:

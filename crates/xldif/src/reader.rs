@@ -260,7 +260,8 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         match (text, rel) {
             (Some(text), Some(rel)) if kind != SheetKind::Chartsheet => {
                 let sheet_rels = pkg.relationships(&rel.target)?;
-                let context = SheetContext { shared: &shared, rels: &sheet_rels, styles: &styles };
+                let context =
+                    SheetContext { shared: &shared, rels: &sheet_rels, styles: &styles, date1904: wb.date1904 };
                 parse_sheet(&text, &rel.target, &context, &mut sheet, &mut budget, &mut notes)?;
                 read_comments(pkg, &sheet_rels, &people, &mut sheet)?;
                 sheet_rels.iter().filter_map(|r| unread_sheet_part(&r.kind)).for_each(|what| notes.unread(what));
@@ -496,6 +497,7 @@ struct SheetContext<'a> {
     shared: &'a [Arc<str>],
     rels: &'a [Relationship],
     styles: &'a crate::styles::Styles,
+    date1904: bool,
 }
 
 /// The theme's color scheme as one fingerprint: each named slot and its
@@ -579,7 +581,7 @@ fn parse_sheet(
                     let style = e.attr("s").and_then(|s| s.parse().ok()).unwrap_or(0);
                     let kind = e.attr("t").unwrap_or("n").to_owned();
                     let raw = parse_cell_children(&mut p)?;
-                    let value = match type_value(&kind, raw.value, raw.inline, context.shared) {
+                    let value = match type_value(&kind, raw.value, raw.inline, context) {
                         Ok(v) => v,
                         Err(raw) => {
                             bad_values += 1;
@@ -677,7 +679,13 @@ fn parse_cell_children(p: &mut Parser<'_>) -> Result<RawCell, Error> {
 
 /// Types a cell's stored value by its `t` attribute. `Err` carries raw text
 /// that does not fit the declared type.
-fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared: &[Arc<str>]) -> Result<Value, String> {
+fn type_value(
+    kind: &str,
+    value: Option<String>,
+    inline: Option<String>,
+    context: &SheetContext,
+) -> Result<Value, String> {
+    let shared = context.shared;
     if kind == "inlineStr" {
         return Ok(inline.map_or(Value::Empty, |t| Value::Text(t.into())));
     }
@@ -695,9 +703,13 @@ fn type_value(kind: &str, value: Option<String>, inline: Option<String>, shared:
             _ => Err(v),
         },
         "e" => Ok(Value::Error(v)),
-        // ISO 8601 dates. Excel's transitional saves use serial numbers; a
-        // strict save may use these (unverified), so keep the text.
-        "d" => Ok(Value::Text(v.into())),
+        // An ISO 8601 date, which a Strict Open XML save writes where the
+        // usual save writes a serial number (observed in Excel:
+        // `<c t="d"><v>2024-01-01</v></c>`). It becomes that serial, so the
+        // two saves of one workbook compare equal. Text Excel would not
+        // write here stays text.
+        "d" => Ok(crate::numfmt::serial_from_iso(v.trim(), context.date1904)
+            .map_or_else(|| Value::Text(v.into()), Value::Number)),
         _ => match v.trim() {
             "" => Ok(Value::Empty),
             t => t.parse::<f64>().ok().filter(|n| n.is_finite()).map(Value::Number).ok_or(v),

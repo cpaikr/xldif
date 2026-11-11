@@ -51,13 +51,14 @@ Status:
 | Build or reuse | Build. Borrow ideas, and permissively licensed code with attribution | The GitHub survey (2026-11-10) found no tool that combines formatting diffs, row and column alignment, and an HTML report. workbooklens (Apache-2.0) compares by position; xlsx-review (MIT) aligns but skips formatting |
 | Language and layout | Rust workspace: `crates/xldif` (library, no process I/O) and `crates/xldif-cli` (clap, process contract) | Same boundaries, lints, and release tooling as dsdai |
 | Workbook reader | Own read-only OOXML reader on `zip` + `quick-xml` | `calamine` cannot read styles, comments, or validation. `umya-spreadsheet` is a read/write object model that doesn't resolve effective formatting and isn't built around input bounds. A diff needs exact control over style inheritance, formulas, and hostile-input bounds |
-| File types | `.xlsx` and `.xlsm` (macros not diffed). `.xlsb` and `.xls` are rejected with `unsupported_format` | `.xlsb` is a separate binary format; add it later only if real files need it |
+| File types | `.xlsx` and `.xlsm` (macros not diffed), read as saved. `.xls`, `.xlsb`, and password-protected workbooks are read through a copy Excel saves as `.xlsx`, where Excel is installed; elsewhere they fail with `unsupported_format` | A second reader for a binary format would double the format knowledge to keep right; Excel already has it, on every machine that runs xldif |
 | Values | Stored (cached) values; no recalculation, no Excel needed | Deterministic and portable. Warn on manual calculation, `fullCalcOnLoad`, formulas with no cached value, and date-system mismatches |
 | Scope | Two-file comparison only | Merging, comparing a series of versions, and range-to-range comparison are out of v1 |
 | JSON style | camelCase fields and dsdai's status words (`same`, `changed`, `onlyBase`, `onlyOther`, plus `moved`) | One vocabulary across the user's tools |
 | Fixtures | Synthetic workbooks written by `rust_xlsxwriter` with explicit formula results, plus hand-made Excel-saved files with invented content | rust_xlsxwriter stores 0 as every formula result unless told otherwise. Shared formulas, threaded comments, dynamic arrays, and real style inheritance only come from Excel |
 | Oracles | openpyxl for values and formulas; Excel COM (`Range.Text`, `DisplayFormat`, colours) on Windows for display strings and effective formats | Independent checks of the reader, not of xldif against itself |
 | Excel's role | A converter for inputs the reader rejects and a test oracle; never the reader | Reviewed 2026-11-11 with Excel on every machine that runs xldif: Excel reads formats one cell at a time through COM, which is far too slow, recalculates on open, and cannot run in CI. The reader's stored values stay the basis of a comparison |
+| Open workbooks | Read as last saved, with an `open_in_another_program` warning; `--unsaved` reads a copy the running Excel makes with `SaveCopyAs` | The saved file is what anyone else would get, so it stays the default. The copy leaves the open workbook unsaved and untouched. The workbook is found among registered running objects, never asked for by name, which would make Excel load a file that is not open. Not handled: a workbook opened from OneDrive or SharePoint (Excel knows it by its web address), Protected View, and Excel while a cell is being edited; each fails with `excel_failed` and a hint |
 | Confidentiality | Same rule as dsdai: real workbooks only under git-ignored `fixtures/private/`. Their contents, file names, and derived values never appear in tests, docs, or commits | Real inputs are audit workpapers |
 
 ## Architecture
@@ -167,7 +168,9 @@ Based on dsdai's contract version 1:
 - **Error codes:** dsdai's `file_not_found`, `invalid_archive` (also used for
   bounds violations, as in dsdai), `invalid_xml`, `invalid_argument`,
   `output_exists`, and `io_error`, plus `unsupported_format`, which is new
-  for `.xlsb` and `.xls`, and `internal_error` for a panic.
+  for `.xlsb` and `.xls` where Excel cannot convert them, `excel_failed`
+  for `--unsaved` when Excel does not hand the workbook over, and
+  `internal_error` for a panic.
 - `metadata.contract` starts at 1; new fields are added without removing old
   ones.
 
@@ -540,17 +543,15 @@ is proven on real files before the full reader is built.
 - **Values hidden under merges:** Excel keeps values in a merged range's
   non-anchor cells (the private corpus has them). The diff must decide
   whether to report changes there, and say they are hidden.
-- **Unverified reader facts:** whether Excel's strict save writes `t="d"`
-  dates (they are read as text today, which would make strict and
-  transitional saves differ), whether `<f>` and `<definedName>` text uses
-  `_xHHHH_` escapes, the root element of macro sheets, and whether a cell
-  reference naming another row than its `<row>` really wins. Confirm each
-  on an Excel-saved file.
-- **Format facts from memory:** row `customFormat`, `dxf` `bgColor`, the
-  threaded-comment fallback, and dynamic-array `cm` are not yet checked on
-  real Excel files. Confirm each on a hand-made Excel file in the milestone
-  that implements it, and record what was observed in a format reference,
-  as dsdai does.
+- **Unverified reader facts:** the root element of macro sheets, and
+  whether a cell reference naming another row than its `<row>` really wins.
+  Confirm each on an Excel-saved file. (Strict-save `t="d"` dates and
+  `_xHHHH_` escapes in strings were observed in `fixtures/excel/`; the
+  dates were read as text until then.)
+- **Format facts:** row `customFormat`, `dxf` `bgColor`, the note Excel
+  writes beside a threaded comment, and dynamic-array `cm` were observed in
+  the Excel-saved fixtures and are asserted in
+  `crates/xldif/tests/excel_saved.rs`, which is the record of what was seen.
 - **Formula tokenizer:** edge cases include structured references, external
   workbooks, and names that look like cell references. Unknown tokens pass
   through, and one bad formula never fails a whole comparison.

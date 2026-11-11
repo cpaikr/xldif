@@ -4,7 +4,9 @@
 changed: values, formulas, formatting, and workbook objects. Rows and columns
 are matched by content, so an inserted row is one change, not every cell
 below it. Agents read its JSON; people read its side-by-side HTML report.
-No Excel installation is needed.
+`.xlsx` and `.xlsm` need no Excel. On Windows with Excel installed, `.xls`,
+`.xlsb`, and password-protected workbooks are read through a copy Excel
+saves, and `--unsaved` reads a workbook as Excel has it open.
 
 **Status:** milestones M1–M5 done; no release is published yet. `compare`
 reports value, formula, and format changes; inserted, deleted, and moved
@@ -41,6 +43,16 @@ CLI. See [PLAN.md](PLAN.md).
   carry the same two fields.
 
 All accept `--format text`. Run `xldif <command> --help` for details.
+
+Excel, where installed (Windows), is used for two things, each reported in a
+warning:
+
+- A `.xls`, `.xlsb`, or password-protected workbook is read through a copy
+  that a hidden Excel saves as `.xlsx` (about fifteen seconds a file). Set
+  `XLDIF_PASSWORD` for a password to open.
+- A workbook that is open in Excel is read as last saved. `--unsaved` reads
+  what Excel holds now instead, unsaved edits included; the open workbook is
+  not saved, closed, or changed.
 
 | Path | Purpose |
 |---|---|

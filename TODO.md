@@ -9,11 +9,6 @@ milestones; this file holds what is left. Remove an item when it lands.
   release workflow accepts) picks the version, sets it in `Cargo.toml`, and
   pushes its `v*` tag ([AGENTS.md](AGENTS.md#release)). It waits for the
   comparison-model item below.
-- **Comparing a workbook that is open in Excel.** A saved workbook that
-  Excel has open already compares (the last saved state). Undecided:
-  a warning when a compared file has a `~$` lock file beside it, and
-  comparing unsaved edits through an Excel snapshot (`SaveCopyAs`) as part
-  of the converter below.
 
 ## Review follow-ups
 
@@ -26,11 +21,13 @@ the first.
    empty string shows as removed and added on identical workbooks). Give
    the renderers a typed model, serialize at the edge, and split `diff.rs`.
    Check whether a moved row and a row-layout change can share a change id.
-2. **Excel as converter and oracle.** An optional step that has Excel save
-   `.xls`, `.xlsb`, and password-protected inputs as `.xlsx` before
-   comparing; the format and colour oracle against Excel's `DisplayFormat`
-   that [PLAN.md](PLAN.md#decisions) planned; and an Excel-saved workbook
-   with invented content among the public fixtures.
+2. **Excel as format oracle.** Check the reader's resolved formats (font,
+   fill, borders, alignment, number format) against Excel's own
+   `DisplayFormat`, one cell per distinct style, on the Excel-saved
+   fixtures and with counts only on the private corpus. Colours compare
+   symbolically in xldif, so only explicit RGB colours can be checked.
+   Reading a `.xls`, `.xlsb`, or password-protected workbook through Excel
+   and the Excel-saved fixtures are done.
 3. **Smaller defects.**
    - Built-in number formats 37–40 are locale-dependent too, and Excel does
      not write a code for them when it saves. Korean Excel shows a bare 37
@@ -59,8 +56,6 @@ the first.
   has one.
 - **Tables.** Excel tables (`xl/tables/*.xml`) and their styles are not
   compared; the `not_compared` warning names them.
-- **`.xlsb` input.** Binary workbooks are rejected with `unsupported_format`
-  until the converter above exists.
 - **Row labels from date cells.** A row's label is its leftmost text. A row
   keyed by a date (a transaction list) has no label. Date-formatted column
   headers already read as ISO dates.
@@ -70,11 +65,9 @@ the first.
 Facts from memory that need an Excel-saved file before they count as
 verified. See [PLAN.md](PLAN.md#risks-to-watch) for details:
 
-- reader facts: strict-save `t="d"` dates, `_xHHHH_` escapes in `<f>` and
-  `<definedName>`, macro-sheet roots, and a cell reference naming another
-  row than its `<row>`;
-- format facts: row `customFormat`, `dxf` `bgColor`, the threaded-comment
-  fallback, and dynamic-array `cm`;
+- reader facts: `_xHHHH_` escapes in `<f>` and `<definedName>` (seen in
+  strings only), macro-sheet roots, and a cell reference naming another row
+  than its `<row>`;
 - built-in number formats 27–36 and 50–58 other than 31 (only 31 has been
   observed in Excel), and the currency and accounting formats 5–8 and 41–44
   under regional settings other than Korean;
