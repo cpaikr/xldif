@@ -19,7 +19,13 @@ Output:
 
 Values are the results Excel last saved; xldif never recalculates. A warning
 says when they may be stale (manual calculation, recalculate-on-open, or
-formulas without a stored result).";
+formulas without a stored result).
+
+Excel (Windows only) is used for two things, each with a warning:
+  .xls, .xlsb, and password-protected workbooks are read through a copy a
+  hidden Excel saves as .xlsx (set XLDIF_PASSWORD for a password to open).
+  A workbook open in Excel is read as last saved; --unsaved reads what Excel
+  holds now instead, without saving or changing the open workbook.";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -33,6 +39,11 @@ pub struct Cli {
     /// Indent JSON output.
     #[arg(long, global = true)]
     pub pretty: bool,
+
+    /// Read a workbook that is open in Excel as Excel holds it now, unsaved
+    /// edits included, instead of as last saved.
+    #[arg(long, global = true)]
+    pub unsaved: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -86,7 +97,7 @@ pub enum Command {
     /// (`externalLinks`, in the order formulas number them: `[1]` is the
     /// first).
     Inspect {
-        /// The workbook (.xlsx or .xlsm).
+        /// The workbook.
         book: PathBuf,
         #[arg(long, value_enum, default_value_t = Format::Json)]
         format: Format,

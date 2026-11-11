@@ -1203,6 +1203,57 @@ fn civil(z: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
+/// A civil date (proleptic Gregorian) to days since 1970-01-01.
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let mp = i64::from(if m > 2 { m - 3 } else { m + 9 });
+    let doy = (153 * mp + 2) / 5 + i64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// The serial number of an ISO 8601 date or date and time
+/// (`2024-01-01`, `2024-01-01T06:30:00`, with or without fractional seconds
+/// and a trailing `Z`), in the given date system. `None` for anything else,
+/// and for dates before the system's first day.
+pub fn serial_from_iso(text: &str, date1904: bool) -> Option<f64> {
+    let text = text.strip_suffix('Z').unwrap_or(text);
+    let (date, time) = text.split_once('T').map_or((text, None), |(d, t)| (d, Some(t)));
+    let mut parts = date.splitn(3, '-');
+    let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+    if y.len() != 4 || m.len() != 2 || d.len() != 2 {
+        return None;
+    }
+    let (y, m, d): (i64, u32, u32) = (y.parse().ok()?, m.parse().ok()?, d.parse().ok()?);
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) || civil(days_from_civil(y, m, d)) != (y, m, d) {
+        return None;
+    }
+    let seconds = match time {
+        None => 0.0,
+        Some(t) => {
+            let mut parts = t.splitn(3, ':');
+            let (h, min, s) = (parts.next()?, parts.next()?, parts.next().unwrap_or("0"));
+            let (h, min, s): (u32, u32, f64) = (h.parse().ok()?, min.parse().ok()?, s.parse().ok()?);
+            if h > 23 || min > 59 || !(0.0..60.0).contains(&s) {
+                return None;
+            }
+            f64::from(h * 3600 + min * 60) + s
+        }
+    };
+    let days = days_from_civil(y, m, d);
+    let serial = if date1904 {
+        days + 24_107
+    } else {
+        // The 1900 system counts a 1900-02-29 that never was, so days
+        // before 1900-03-01 are one lower.
+        let serial = days + 25_569;
+        if serial < 61 { serial - 1 } else { serial }
+    };
+    (serial >= i64::from(!date1904)).then(|| serial as f64 + seconds / 86_400.0)
+}
+
 /// Excel's calendar for a serial day. The 1900 system counts a 1900-02-29
 /// that never was (serial 60) and shows serial 0 as 1900-01-00.
 fn excel_date(serial: i64, date1904: bool) -> (i64, u32, u32) {
@@ -1416,6 +1467,23 @@ mod tests {
         assert_eq!(rendered_code("0.00"), "0.00");
         // An id this table does not know still shows as General.
         assert_eq!(show("builtin:23", 1234.0), "1234");
+    }
+
+    #[test]
+    fn iso_text_becomes_the_serial_excel_would_store() {
+        use super::serial_from_iso;
+        assert_eq!(serial_from_iso("2024-01-01", false), Some(45_292.0));
+        assert_eq!(serial_from_iso("2024-01-01", true), Some(43_830.0));
+        assert_eq!(serial_from_iso("2024-01-01T06:00:00Z", false), Some(45_292.25));
+        assert_eq!(serial_from_iso("2024-01-01T06:00:00.500", false), Some(45_292.25 + 0.5 / 86_400.0));
+        // Either side of the leap day Excel invented.
+        assert_eq!(serial_from_iso("1900-01-01", false), Some(1.0));
+        assert_eq!(serial_from_iso("1900-02-28", false), Some(59.0));
+        assert_eq!(serial_from_iso("1900-03-01", false), Some(61.0));
+        assert_eq!(serial_from_iso("1904-01-01", true), Some(0.0));
+        for not_a_date in ["", "2024-1-1", "2024-02-30", "2024-13-01", "1899-12-31", "2024-01-01T25:00:00", "Monday"] {
+            assert_eq!(serial_from_iso(not_a_date, false), None, "{not_a_date}");
+        }
     }
 
     #[test]

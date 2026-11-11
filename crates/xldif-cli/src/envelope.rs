@@ -50,6 +50,11 @@ impl Failure {
         }
     }
 
+    /// Excel was asked for a workbook and did not hand it over.
+    pub fn excel(message: String, hint: &str) -> Self {
+        Self { code: "excel_failed", message, hint: Some(hint.to_owned()), usage: false }
+    }
+
     pub const fn exit_code(&self) -> u8 {
         if self.usage { 2 } else { 1 }
     }

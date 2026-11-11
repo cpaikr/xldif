@@ -16,6 +16,23 @@ Start broad, then narrow:
    and never replaces a compared workbook; `--force` replaces another
    existing file.
 
+`.xls`, `.xlsb`, and password-protected workbooks work where Excel is
+installed (Windows): xldif reads a copy Excel saves as `.xlsx`, which takes
+about fifteen seconds a file, and says so in a `converted_by_excel` warning.
+Values are then as Excel calculated them on opening, and font and colour
+differences against a file that was not converted may come from the
+conversion. A password to open goes in the `XLDIF_PASSWORD` environment
+variable; ask the user to set it rather than putting a password on a command
+line.
+
+A workbook that is open in Excel is read as last saved, with an
+`open_in_another_program` warning. When the user wants what is on their
+screen, edits not yet saved included, add `--unsaved`: xldif reads a copy
+the running Excel makes, and the open workbook is not saved or changed. It
+fails with `excel_failed` when Excel is busy (a cell being edited, a dialog
+open) or the workbook was opened from OneDrive or SharePoint; follow the
+`hint`.
+
 `--tolerance 0.005` ignores rounding noise between numbers.
 `--align position` compares A1 with A1 when the user explicitly wants a
 cell-by-cell comparison without row matching.

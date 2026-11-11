@@ -29,5 +29,5 @@ and use `target/release/xldif` (`xldif.exe` on Windows).
 ## After installing
 
 Run `xldif --version`, then resume the task. A comparison failure with an
-`error.code` (for example `unsupported_format` for an `.xlsb` file) is not an
-installation problem; read its `hint`.
+`error.code` (for example `unsupported_format` for an `.xlsb` file on a
+machine without Excel) is not an installation problem; read its `hint`.

@@ -6,6 +6,7 @@
 mod cli;
 mod commands;
 mod envelope;
+mod excel;
 
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -88,7 +89,7 @@ fn main() -> ExitCode {
         }
     };
     let name = cli.command.name();
-    match guarded(|| commands::run(cli.command)) {
+    match guarded(|| commands::run(cli.command, cli.unsaved)) {
         Ok(commands::Output::Text(text)) => {
             write_stdout(&text);
             ExitCode::SUCCESS

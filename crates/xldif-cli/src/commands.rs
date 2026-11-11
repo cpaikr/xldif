@@ -25,10 +25,10 @@ fn file_label(path: &Path) -> String {
     path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
-pub fn run(command: Command) -> Result<Output, Failure> {
+pub fn run(command: Command, unsaved: bool) -> Result<Output, Failure> {
     match command {
         Command::Inspect { book, format } => {
-            let wb = xldif::read_path(&book)?;
+            let wb = crate::excel::read(&book, unsaved)?;
             let (inspection, warnings) = views::inspect(&file_label(&book), &wb);
             let warnings: Vec<Warning> = warnings.into_iter().map(Warning::from).collect();
             Ok(match format {
@@ -47,7 +47,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     Error::new(ErrorCode::InvalidArgument, "--tolerance must be a finite number of 0 or more").into()
                 );
             }
-            let (b, o) = (xldif::read_path(&base)?, xldif::read_path(&other)?);
+            let (b, o) = (crate::excel::read(&base, unsaved)?, crate::excel::read(&other, unsaved)?);
             let options = CompareOptions {
                 tolerance,
                 align: match align {
@@ -138,7 +138,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     })
                 })
                 .transpose()?;
-            let wb = xldif::read_path(&book)?;
+            let wb = crate::excel::read(&book, unsaved)?;
             let found = views::find_sheet(&wb, &sheet)?;
             let listed = views::cells(&wb, found, range, (limit > 0).then_some(limit));
             let warnings: Vec<Warning> = wb.warnings.iter().cloned().map(Warning::from).collect();
