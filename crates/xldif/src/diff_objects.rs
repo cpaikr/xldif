@@ -242,8 +242,10 @@ fn layout_changes(
                 let (row, column) = if kind == Kind::Row { (Some(a), None) } else { (None, Some(col_name(a))) };
                 Location { row, column, range: (a != b).then(|| name(a, b)), ..Location::default() }
             };
+            // `:layout` keeps the id apart from the move of the same row or
+            // column, which names the same two numbers.
             let mut c = change(
-                format!("{id}:{}:{}:{}", kind.as_str(), name(b1, b2), name(o1, o2)),
+                format!("{id}:{}:{}:{}:layout", kind.as_str(), name(b1, b2), name(o1, o2)),
                 kind,
                 Status::Changed,
                 Some(loc(b1, b2)),

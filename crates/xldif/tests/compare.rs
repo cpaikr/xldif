@@ -390,6 +390,44 @@ fn a_tolerance_sized_for_amounts_leaves_rates_telling_rows_apart() {
     assert!(brief(sheet(&c, "Rates")).contains(&"row OnlyOther -→18".to_owned()));
 }
 
+#[test]
+fn the_report_draws_the_rows_the_comparison_paired() {
+    // Row 3 holds only an empty string: nothing to align on, so not a row
+    // of the comparison. The report once worked its rows out again from the
+    // workbooks and showed this one as removed and added.
+    let xml = r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Cash</t></is></c><c r="B1"><v>100</v></c></row>
+                 <row r="2"><c r="A2" t="inlineStr"><is><t>Total</t></is></c><c r="B2"><v>100</v></c></row>
+                 <row r="3"><c r="A3" t="str"><v></v></c></row>"#;
+    let book = || read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", xml).build()).unwrap();
+    let c = compare("a", &book(), "b", &book(), CompareOptions::default());
+    assert_eq!(c.summary, xldif::diff::Summary::default());
+    let axes = c.sheets[0].axes.clone().unwrap();
+    assert_eq!((axes.rows.pairs, axes.rows.lone_base, axes.rows.lone_other), (vec![(1, 1), (2, 2)], vec![], vec![]));
+    let listing = c.list(&Filter { all: true, ..Filter::default() });
+    let html = xldif::html::render_html(&listing, &book(), &book(), &[]);
+    assert!(html.contains("<tr class=\"r\"") && !html.contains("<tr class=\"r r") && !html.contains(" chg"));
+}
+
+#[test]
+fn a_moved_row_that_was_also_resized_has_two_ids() {
+    let rows = |order: &[u32], tall: bool| -> String {
+        let mut out = String::new();
+        for (r, n) in (1..).zip(order) {
+            let height = if tall && *n == 1 { r#" ht="40" customHeight="1""# } else { "" };
+            out.push_str(&format!(
+                r#"<row r="{r}"{height}><c r="A{r}" t="inlineStr"><is><t>Line {n}</t></is></c><c r="B{r}"><v>{}</v></c></row>"#,
+                n * 100
+            ));
+        }
+        out
+    };
+    let book = |xml: &str| read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", xml).build()).unwrap();
+    let (b, o) = (book(&rows(&[0, 1, 2, 3, 4], false)), book(&rows(&[0, 2, 3, 4, 1], true)));
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    let ids: Vec<&str> = c.sheets[0].changes.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["s0:row:2:5", "s0:row:2:5:layout"]);
+}
+
 /// Account rows under period columns headed by dates (serials, formatted).
 fn period_book(periods: &[f64], rows: &[(&str, &[f64])]) -> Vec<u8> {
     use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};

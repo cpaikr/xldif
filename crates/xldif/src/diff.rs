@@ -180,6 +180,39 @@ pub struct Location {
     pub text: Option<String>,
 }
 
+impl Location {
+    /// The cells this location names: its ranges (`A1:B2 D5` is two), or its
+    /// one cell. Empty for a row, a column, or a workbook object.
+    pub fn ranges(&self) -> Vec<Range> {
+        let ranges: Vec<Range> =
+            self.range.as_deref().map(|r| r.split_whitespace().filter_map(Range::parse).collect()).unwrap_or_default();
+        if !ranges.is_empty() {
+            return ranges;
+        }
+        self.cell
+            .as_deref()
+            .and_then(crate::cellref::parse_cell)
+            .map(|(row, col)| Range { first_row: row, first_col: col, last_row: row, last_col: col })
+            .into_iter()
+            .collect()
+    }
+
+    /// The first and last row (for a `row` change) or column (for a
+    /// `column` change) this location names: one line, or a folded run such
+    /// as `3:5` or `B:D`.
+    pub fn lines(&self, kind: Kind) -> Option<(u32, u32)> {
+        let one = |t: &str| if kind == Kind::Row { t.parse().ok() } else { crate::cellref::parse_col(t) };
+        if let Some((a, b)) = self.range.as_deref().and_then(|r| r.split_once(':'))
+            && let (Some(a), Some(b)) = (one(a), one(b))
+        {
+            return Some((a.min(b), a.max(b)));
+        }
+        let line =
+            if kind == Kind::Row { self.row } else { self.column.as_deref().and_then(crate::cellref::parse_col) };
+        line.map(|n| (n, n))
+    }
+}
+
 /// One property that differs, as `base` and `other` show it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Property {
@@ -207,7 +240,9 @@ pub struct Labels {
 #[serde(rename_all = "camelCase")]
 pub struct Change {
     /// Derived from the change's location, so it is stable across filters,
-    /// limits, and reruns: `s<sheet>:<kind>:<base ref>:<other ref>`.
+    /// limits, and reruns: `s<sheet>:<kind>:<base ref>:<other ref>`, with
+    /// `:layout` after it for a row's or column's size, hidden state, or
+    /// style. No two changes of one comparison share an id.
     pub id: String,
     pub kind: Kind,
     pub status: Status,
@@ -267,7 +302,19 @@ pub struct SheetComparison {
     pub moved: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alignment: Option<AlignmentView>,
+    /// The pairing `alignment` summarizes, in full, for a renderer that
+    /// draws the two sheets side by side: it must show the rows and columns
+    /// the comparison paired, not work them out again from the workbooks.
+    #[serde(skip)]
+    pub axes: Option<SheetAxes>,
     pub changes: Vec<Change>,
+}
+
+/// One sheet pair's rows and columns as the comparison paired them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SheetAxes {
+    pub rows: Axis,
+    pub cols: Axis,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -414,6 +461,7 @@ pub fn compare(
             renamed: *renamed,
             moved: is_moved,
             alignment: Some(al.view()),
+            axes: Some(SheetAxes { rows: al.rows.clone(), cols: al.cols.clone() }),
             changes,
         });
     }
@@ -526,7 +574,17 @@ fn workbook_objects(
 fn lone_sheet(id: String, status: Status, name: &str) -> SheetComparison {
     let (base, other) =
         if status == Status::OnlyBase { (Some(name.to_owned()), None) } else { (None, Some(name.to_owned())) };
-    SheetComparison { id, status, base, other, renamed: false, moved: false, alignment: None, changes: Vec::new() }
+    SheetComparison {
+        id,
+        status,
+        base,
+        other,
+        renamed: false,
+        moved: false,
+        alignment: None,
+        axes: None,
+        changes: Vec::new(),
+    }
 }
 
 fn summarize(sheets: &[SheetComparison]) -> Summary {
@@ -961,12 +1019,18 @@ fn runs(pairs: &[(u32, u32)], lone_base: &[u32], lone_other: &[u32]) -> Vec<Run>
     out
 }
 
-struct Axis {
+/// The rows, or the columns, of one sheet pair that hold content, by sheet
+/// number: every one is in exactly one of the four lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Axis {
     /// `(base number, other number)` pairs in order.
-    pairs: Vec<(u32, u32)>,
-    moves: Vec<(u32, u32)>,
-    lone_base: Vec<u32>,
-    lone_other: Vec<u32>,
+    pub pairs: Vec<(u32, u32)>,
+    /// Moved items: `(base number, other number)`, outside the ordered pairs.
+    pub moves: Vec<(u32, u32)>,
+    /// Numbers only the base sheet has, in order.
+    pub lone_base: Vec<u32>,
+    /// Numbers only the other sheet has, in order.
+    pub lone_other: Vec<u32>,
 }
 
 impl Axis {
