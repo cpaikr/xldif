@@ -59,9 +59,6 @@ the first two.
    - Between a 1900 and a 1904 workbook, date cells compare by the date
      they show, but the alignment's tokens are still the serials, so equal
      dates do not help pair rows there. It belongs with the alignment item.
-   - [PLAN.md](PLAN.md#architecture)'s module list describes reader parts
-     that were not built (`indexedColors`, `metadata.xml`, `applyX`
-     resolution). [ARCHITECTURE.md](ARCHITECTURE.md) is accurate.
    - External workbook links are compared by index (`[1]`), not by the file
      they name.
    - The release workflow builds Linux and macOS archives nobody uses.

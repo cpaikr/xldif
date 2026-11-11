@@ -65,54 +65,66 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
                                                                    align, diff, render
 ```
 
-`crates/xldif` modules:
+`crates/xldif` modules, as built. [ARCHITECTURE.md](ARCHITECTURE.md) lists
+every file and the invariants; this list keeps the choices made inside
+them, including what the first plan named and the code does not do.
 
-- **`package`:** zip access with bounds (archive size, member count,
-  decompressed size, XML depth, cell count), and relationship and
-  content-type resolution.
+- **`package`, `xml`:** zip access with bounds (archive size, member count,
+  each member's and the total decompressed size), relationship and
+  content-type resolution, and a pull parser with a depth cap. The reader
+  bounds the number of records (cells, rows, strings, sheets, names,
+  styles).
 - **`reader`:**
   - Workbook level: `workbook.xml` (sheet order, visibility, defined names,
     `calcPr`, and the `workbookPr date1904` flag), shared strings (rich text
-    flattened, runs kept for display), `styles.xml` (including
-    `indexedColors`), `theme1.xml`, `metadata.xml` (dynamic arrays), and
-    `persons.xml`.
-  - Each sheet's XML: cells, types, cached values, formulas, merges, row and
-    column records, data validation, conditional formatting, and hyperlinks.
-  - Comments: legacy notes and threaded comments.
-- **`model`:** an immutable `Workbook` → `Sheet` → sparse cell grid.
-  - Each written cell holds a typed `Value` (number, string, bool, error,
-    empty), a `Formula`, and a `StyleId`.
-  - `Formula` is one of: none; plain; shared (expanded to each cell); or an
-    array anchor, which stores the anchor cell, its range, and whether it is
-    a dynamic or legacy (CSE) array. Cells inside an array range are values
-    marked "spilled from" their anchor and are not given their own formula.
+    flattened to its text, phonetic runs dropped), `styles.xml` (through
+    `styles`), the theme's colour scheme (kept as a fingerprint only), and
+    `persons.xml` for the authors of threaded comments.
+  - Each sheet's XML: cells, types, cached values, and formulas, and through
+    `sheet_objects` merges, row and column records, data validation,
+    conditional formatting, hyperlinks, legacy notes, and threaded comments.
+  - Content with no place in the model is counted for the `not_compared`
+    warning.
+  - Not built: `indexedColors` (an indexed colour compares by its index,
+    whatever palette the workbook defines) and `metadata.xml` (a dynamic
+    array is not told from a legacy array formula).
+- **`model`:** an immutable `Workbook` → `Sheet` → rows of written cells.
+  - Each written cell holds a typed `Value` (number, text, bool, error,
+    empty), an optional `Formula`, and a style index.
+  - A `Formula` has a kind (normal, shared, array, data table), its text,
+    and for an anchor the range it covers. A shared formula's text is
+    expanded for each of its cells. An array formula sits on its anchor
+    only; the other cells of its range are plain values with no mark of
+    where they came from.
   - Row and column records keep their own style, height or width, and hidden
     flag.
-- **`format`:** resolves a cell's style into comparable properties.
+- **`styles`:** resolves a cell's style index into comparable properties.
   - A written `<c>` always uses its own `s`, which defaults to 0.
-  - Inheritance applies only to cells that aren't written: the row style when
-    the row has `customFormat="1"`, else the column style, else 0.
-  - Cell formats are resolved through `cellStyleXfs` (the named-style parent)
-    according to the `applyX` flags. The named style's name is a property of
-    its own.
+  - Cells that aren't written get no format of their own: a row's style
+    (kept when the row has `customFormat="1"`) and a column's style are
+    compared as row and column records.
+  - A `cellXfs` entry is taken as the whole format, which is how Excel
+    writes it. The named-style parent (`cellStyleXfs`) contributes only its
+    name, and the `applyX` flags are not consulted (unverified against
+    files that rely on inheriting from the named style).
   - Colours are kept symbolic: a theme index with tint, an indexed colour,
-    an RGB value, or auto. Resolved RGB is for display only.
-  - The theme-colour index order is lt1, dk1, lt2, dk2, then accents. That is
-    not the order of `clrScheme` in theme1.xml.
-  - A `dxf` (conditional-formatting style) is a set of optional overrides,
-    not a full format. A solid `dxf` fill keeps its colour in `bgColor`.
+    an RGB value, or auto. Nothing resolves them to RGB.
+  - A `dxf` (conditional-formatting style) is kept as a canonical
+    description of its XML, so rules compare by what they apply, not by
+    index.
 - **`formula`:**
   - A tokenizer for A1 references: sheet-qualified, absolute and relative,
-    ranges, whole rows and columns, structured and external references, and
-    `_xlfn.` names. Tokens it doesn't know pass through verbatim.
-  - It produces a reference-free shape: functions, operators, and constants,
-    with references abstracted away.
-  - It can rewrite references through a row and column map.
-- **`align`:** sheet pairing, row and column alignment, and move detection
-  (see Alignment). This includes a port of dsdai's `difflib.rs` matcher and
-  its non-crossing key pairing (same owner, so no licence issue).
-- **`diff`:** cell, row, column, and object changes over an alignment, plus
-  context labels, change folding, and the summary.
+    ranges, whole rows and columns, 3-D spans, and external workbooks'
+    sheets. Structured table references and anything it doesn't know pass
+    through verbatim.
+  - It shifts a shared formula to each of its cells, rewrites references
+    through a row and column map, and produces a position-free form
+    (relative parts as offsets) for folding and for alignment tokens.
+- **`align`:** row and column sequence alignment and move detection (see
+  Alignment).
+- **`diff`, `diff_objects`:** sheet pairing, column-then-row alignment of
+  each pair, value and formula changes, formats, layout, and objects over
+  the alignment, plus context labels, change folding, and the summary.
 - **`numfmt`:** an Excel number-format renderer for display strings,
   covering sections, conditions, dates and times, fractions, scientific
   notation, and literal text. Every code renders. Built-in ids whose code
@@ -129,10 +141,12 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   Excel (the sign under conditional sections, negative zero, continued-
   fraction denominators, the case of `am/pm`) were observed through
   `scripts/display_parity.py` and are pinned by unit tests.
-- **`render`:** text, JSON (serde structs), and HTML.
+- **`views`, `html`:** the `inspect` and `cells` results, and the HTML
+  report. Results are serde structs; the CLI serializes them as JSON or
+  prints its own text listing.
 
-The CLI owns argument parsing, the envelope, exit codes, and refusing to
-overwrite files. Release checks and `upgrade` follow dsdai later, in M5.
+The CLI owns argument parsing, the envelope, the text listings, exit codes,
+and refusing to overwrite files. There is no `version` or `upgrade` command.
 
 ## Process contract
 
