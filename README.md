@@ -47,6 +47,7 @@ All accept `--format text`. Run `xldif <command> --help` for details.
 | [skills/xldif](skills/xldif/SKILL.md) | The agent skill: routing, [comparing](skills/xldif/references/comparing.md), [installation](skills/xldif/references/installation.md) |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Boundaries, invariants, and the process contract |
 | [PLAN.md](PLAN.md) | Design decisions and milestones |
+| [TODO.md](TODO.md) | Open items and pending verification |
 | `fixtures/private/` | Git-ignored real workbooks for local checks only |
 
 ## Installing

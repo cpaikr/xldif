@@ -36,13 +36,9 @@ Status:
 - M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
   with evals on the synthetic demo pair) and a release workflow that builds
   Windows, Linux, and macOS archives when a `v*` tag is pushed.
-- Next action: the maintainer (`sjunepark`, the only actor the release
-  workflow accepts) decides the first version, sets it in `Cargo.toml`, and
-  pushes its `v*` tag.
-  Open items: table styles; `x14` extension-list validation and
-  conditional formatting; `.xlsb` input; row labels from date cells (a
-  row's label is still its leftmost text; date-formatted column headers
-  read as ISO dates and pair period columns).
+- Next action: the maintainer reviews the whole project, then decides the
+  first release. Open items and pending verification are in
+  [TODO.md](TODO.md).
 
 ## Decisions
 

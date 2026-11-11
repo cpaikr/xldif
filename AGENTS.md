@@ -17,6 +17,7 @@
 ## Read first
 
 - `PLAN.md` for decisions, the milestone in progress, and the next action.
+- `TODO.md` for open items and facts still to verify.
 - `ARCHITECTURE.md` for boundaries, invariants, and the JSON process
   contract.
 - `README.md` for commands and building.
