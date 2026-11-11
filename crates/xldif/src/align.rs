@@ -215,11 +215,23 @@ fn anchors(base: &[Item], other: &[Item], fell_back: &mut bool) -> Vec<(usize, u
         // not of the content pairs first, keeps one unchanged line that
         // moved from anchoring across every line it passed.
         let region = (alo, ahi, blo, bhi);
-        let mut candidates = unique((&a, &b), region);
+        let by_content = unique((&a, &b), region);
+        let mut candidates = by_content.clone();
         candidates.extend(unique((&la, &lb), region));
         candidates.sort_unstable();
         candidates.dedup();
         let mut found = in_order(&candidates);
+        if candidates.len() > by_content.len() {
+            // A label is weaker evidence than equal content. Anchoring on
+            // one must not cost more equal rows than it gains pairs: an
+            // edited line that moved across rows that repeat unchanged
+            // would otherwise keep every one of them from pairing.
+            let by_content = in_order(&by_content);
+            let worth = |anchors: &[(usize, usize)]| anchors.len() + equal_left((&a, &b), region, anchors);
+            if worth(&by_content) > worth(&found) {
+                found = by_content;
+            }
+        }
         let (n, m) = (ahi - alo, bhi - blo);
         let large = n.saturating_mul(m) > DIRECT_GAP_WORK.min(full_search(&base[alo..ahi], &other[blo..bhi]));
         if found.is_empty() && large {
@@ -322,6 +334,31 @@ fn run_anchors(
             .collect()
     };
     in_order(&once_on_each_side(runs(a, alo, ahi).into_iter(), runs(b, blo, bhi).into_iter()))
+}
+
+/// How many items could still pair with an equal one once `anchors` have
+/// split the region: equal keys counted gap by gap, whatever their order.
+fn equal_left(
+    (a, b): (&[Option<u64>], &[Option<u64>]),
+    (alo, ahi, blo, bhi): (usize, usize, usize, usize),
+    anchors: &[(usize, usize)],
+) -> usize {
+    let mut total = 0;
+    let (mut x, mut y) = (alo, blo);
+    for &(i, j) in anchors.iter().chain(std::iter::once(&(ahi, bhi))) {
+        let mut counts: HashMap<u64, usize> = HashMap::new();
+        for key in a[x..i].iter().flatten() {
+            *counts.entry(*key).or_default() += 1;
+        }
+        for key in b[y..j].iter().flatten() {
+            if let Some(count) = counts.get_mut(key).filter(|c| **c > 0) {
+                *count -= 1;
+                total += 1;
+            }
+        }
+        (x, y) = (i + 1, j + 1);
+    }
+    total
 }
 
 /// How many pairs of items the similarity pass may compare in one gap.
@@ -804,6 +841,17 @@ mod tests {
         // All but the odd row beside the block whose name happens to match.
         assert!(right >= 5990 && al.pairs.len() <= 6000, "{right} right of {} pairs", al.pairs.len());
         assert!(al.fell_back);
+    }
+
+    #[test]
+    fn an_edited_line_that_moved_does_not_unpair_rows_that_repeat() {
+        // The total changed and moved to the top; the two rows it passed
+        // are the same row twice, unchanged. Anchoring on the total's label
+        // would leave neither able to pair.
+        let krw = item(Some("krw"), &[100]);
+        let a = vec![krw.clone(), krw.clone(), item(Some("total"), &[200])];
+        let b = vec![item(Some("total"), &[201]), krw.clone(), krw];
+        assert_eq!(align(&a, &b, ROWS).pairs, [(0, 1), (1, 2)]);
     }
 
     #[test]
