@@ -41,9 +41,14 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     those objects compared through the alignment;
   - [html.rs](crates/xldif/src/html.rs): the self-contained side-by-side
     report, built from a comparison listing and the two workbooks;
-  - [diff.rs](crates/xldif/src/diff.rs): sheet pairing, column-then-row
-    alignment, value and formula changes, labels, folding, and the
-    `compare` listing;
+  - [diff.rs](crates/xldif/src/diff.rs): the comparison's result types,
+    sheet pairing, and the `compare` listing, over
+    [diff/grid.rs](crates/xldif/src/diff/grid.rs) (a sheet's content rows
+    and columns, their labels and tokens),
+    [diff/axis.rs](crates/xldif/src/diff/axis.rs) (column-then-row alignment
+    of one sheet pair), and
+    [diff/cells.rs](crates/xldif/src/diff/cells.rs) (value and formula
+    changes, labels, folding);
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
   The [`xldif` skill](skills/xldif/SKILL.md) never reads workbooks itself:
@@ -85,6 +90,11 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
 - **Deterministic results.** Content hashes are fixed (FNV-1a) and every
   alignment tie breaks by index, so the same inputs always give the same
   changes and ids. Change ids derive from locations, never from list order.
+- **One pairing.** A renderer draws the rows and columns the comparison
+  paired (`SheetComparison.axes`) and reads a change's cells through
+  `Location::ranges` and `Location::lines`; it never works the pairing out
+  again from the workbooks, so the report cannot disagree with the JSON.
+  No two changes of a comparison share an id.
 - **Swapped files mirror.** Each sheet pair is aligned in a fixed order,
   whichever file is the base, so the rows, columns, and values reported for
   `A B` are those for `B A` with the sides exchanged. Formula changes have
