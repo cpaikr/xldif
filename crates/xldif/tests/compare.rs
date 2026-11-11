@@ -310,3 +310,100 @@ fn many_changes_and_repeated_labels_stay_fast() {
     assert_eq!(c.summary.rows_only_other, 1);
     assert_eq!(c.summary.value, n as usize);
 }
+
+/// Account rows under period columns headed by dates (serials, formatted).
+fn period_book(periods: &[f64], rows: &[(&str, &[f64])]) -> Vec<u8> {
+    use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet().set_name("S").unwrap();
+    let date = Format::new().set_num_format("yyyy-mm-dd");
+    sheet.write_string(0, 0, "Account").unwrap();
+    for (c, p) in (1u16..).zip(periods) {
+        sheet.write_number_with_format(0, c, *p, &date).unwrap();
+    }
+    for (r, (label, values)) in (1u32..).zip(rows) {
+        sheet.write_string(r, 0, *label).unwrap();
+        for (c, v) in (1u16..).zip(*values) {
+            sheet.write_number(r, c, *v).unwrap();
+        }
+    }
+    book.save_to_buffer().unwrap()
+}
+
+#[test]
+fn date_headers_label_and_pair_period_columns() {
+    // Periods roll forward: 2025 is added in front, 2023 drops off, and the
+    // 2024 figures are restated.
+    let (d23, d24, d25) = (45_291.0, 45_657.0, 46_022.0);
+    let base = period_book(&[d24, d23], &[("Cash", &[100.0, 90.0]), ("Receivables", &[200.0, 180.0])]);
+    let other = period_book(&[d25, d24], &[("Cash", &[120.0, 105.0]), ("Receivables", &[230.0, 200.0])]);
+    let (b, o) = (read_bytes(base).unwrap(), read_bytes(other).unwrap());
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    let s = &c.sheets[0];
+    let columns: Vec<String> = s.changes.iter().filter(|c| c.kind == Kind::Column).map(describe).collect();
+    assert_eq!(columns.len(), 2, "one period added, one dropped: {:?}", brief(s));
+    let restated: Vec<&Change> = s.changes.iter().filter(|c| c.kind == Kind::Value).collect();
+    assert_eq!(restated.len(), 1, "{:?}", brief(s));
+    let labels = restated[0].labels.as_ref().unwrap();
+    assert_eq!((labels.row.as_deref(), labels.column.as_deref()), (Some("Cash"), Some("2024-12-31")));
+}
+
+/// Invoices with a column of due dates (records, not headers), and
+/// optionally an amount column inserted before them.
+/// Entries without a date are `filler`: text, or a number when given.
+fn invoice_book(due: &[Option<f64>], filler: Option<f64>, amounts: bool) -> Vec<u8> {
+    use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};
+    let mut book = Workbook::new();
+    let sheet = book.add_worksheet().set_name("S").unwrap();
+    let date = Format::new().set_num_format("yyyy-mm-dd");
+    let due_col = if amounts { 2 } else { 1 };
+    sheet.write_string(0, 0, "Invoice").unwrap();
+    sheet.write_string(0, due_col, "Due").unwrap();
+    if amounts {
+        sheet.write_string(0, 1, "Amount").unwrap();
+    }
+    for (r, d) in (1u32..).zip(due) {
+        sheet.write_string(r, 0, format!("INV-{r}")).unwrap();
+        match d {
+            Some(d) => sheet.write_number_with_format(r, due_col, *d, &date).unwrap(),
+            None => match filler {
+                Some(n) => sheet.write_number(r, due_col, n).unwrap(),
+                None => sheet.write_string(r, due_col, "on request").unwrap(),
+            },
+        };
+        if amounts {
+            sheet.write_number(r, 1, f64::from(r) * 10.0).unwrap();
+        }
+    }
+    book.save_to_buffer().unwrap()
+}
+
+#[test]
+fn date_records_do_not_key_their_column() {
+    // Every due date moves a year and an amount column is inserted: the
+    // due column still pairs, so its cells compare as value changes. Also
+    // when the dates sit among other entries ("on request"), and when the
+    // column holds a single date among them.
+    // A single date over numbers is shaped like a period column under a
+    // caption; it pairs through the caption's label even when it keys the
+    // column.
+    // Which rows hold a date, and what the other rows hold.
+    type Shape = (fn(u32) -> bool, Option<f64>);
+    let shapes: [Shape; 4] = [(|_| true, None), (|k| k % 2 == 0, None), (|k| k == 0, None), (|k| k == 0, Some(42.0))];
+    for (mixed, (shape, filler)) in shapes.into_iter().enumerate() {
+        let base: Vec<Option<f64>> = (0..12).map(|k| shape(k).then_some(45_300.0 + f64::from(k))).collect();
+        let other: Vec<Option<f64>> = base.iter().map(|d| d.map(|d| d + 366.0)).collect();
+        let (b, o) = (
+            read_bytes(invoice_book(&base, filler, false)).unwrap(),
+            read_bytes(invoice_book(&other, filler, true)).unwrap(),
+        );
+        let c = compare("a", &b, "b", &o, CompareOptions::default());
+        let s = &c.sheets[0];
+        let columns: Vec<String> = s.changes.iter().filter(|c| c.kind == Kind::Column).map(describe).collect();
+        assert_eq!(columns.len(), 1, "mixed {mixed}: only the amount column is new: {columns:?}");
+        let values = s.changes.iter().filter(|c| c.kind == Kind::Value).count();
+        assert_eq!(values, base.iter().flatten().count(), "mixed {mixed}: {:?}", brief(s));
+        let first = s.changes.iter().find(|c| c.kind == Kind::Value).unwrap();
+        assert_eq!(first.labels.as_ref().unwrap().column.as_deref(), Some("Due"));
+    }
+}

@@ -338,12 +338,13 @@ pub fn compare(
 
     let pairs = pair_sheets(base, other);
     let moved = moved_sheets(&pairs);
+    let formats = (Formats::new(&base.styles, base.date1904), Formats::new(&other.styles, other.date1904));
     // Align every sheet pair first: formulas refer across sheets, so each
     // sheet's comparison needs every other sheet's row and column maps.
     let aligned: Vec<(usize, usize, bool, Grid, Grid, Aligned)> = pairs
         .iter()
         .map(|&(bi, oi, renamed)| {
-            let (gb, go) = (Grid::new(&base.sheets[bi]), Grid::new(&other.sheets[oi]));
+            let (gb, go) = (Grid::new(&base.sheets[bi], &formats.0), Grid::new(&other.sheets[oi], &formats.1));
             let al = align_grids(&gb, &go, options);
             (bi, oi, renamed, gb, go, al)
         })
@@ -359,11 +360,7 @@ pub fn compare(
     let mut sheets = Vec::new();
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
-    let shared = Shared {
-        maps: &maps,
-        options,
-        formats: (Formats::new(&base.styles, base.date1904), Formats::new(&other.styles, other.date1904)),
-    };
+    let shared = Shared { maps: &maps, options, formats };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
         let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
@@ -662,7 +659,8 @@ fn display_label(text: &str) -> String {
 }
 
 /// A cell's text as a column header: text that is not a number, or a year
-/// stored as a number (period headers often are).
+/// stored as a number (period headers often are). Date headers are read in
+/// [`Grid::new`], which needs the cell below them.
 fn header_text(cell: &Cell) -> Option<String> {
     let year = |n: f64| n.fract() == 0.0 && (1900.0..=2100.0).contains(&n);
     match &cell.value {
@@ -690,12 +688,13 @@ struct Grid<'a> {
     rows: Vec<&'a Row>,
     /// Columns with content, in order, each with its content cells by row.
     cols: Vec<(u32, Vec<(u32, &'a Cell)>)>,
-    /// Each column's header: the first header text in the top content rows.
-    headers: HashMap<u32, String>,
+    /// Each column's header texts in the top content rows, in row order;
+    /// the first is the column's label.
+    headers: HashMap<u32, Vec<String>>,
 }
 
 impl<'a> Grid<'a> {
-    fn new(sheet: &'a Sheet) -> Self {
+    fn new(sheet: &'a Sheet, formats: &Formats) -> Self {
         let has_tokens =
             |c: &Cell| value_bytes(&c.value).is_some() || c.formula.as_ref().is_some_and(|f| !f.text.is_empty());
         let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(has_tokens)).collect();
@@ -707,10 +706,25 @@ impl<'a> Grid<'a> {
         }
         let cols: Vec<(u32, Vec<(u32, &Cell)>)> = by_col.into_iter().collect();
         let top: HashSet<u32> = rows.iter().take(HEADER_ROWS).map(|r| r.index).collect();
+        let date = |c: &Cell| formats.iso_date(c.style, &c.value);
         let headers = cols
             .iter()
-            .filter_map(|(col, cells)| {
-                cells.iter().filter(|(r, _)| top.contains(r)).find_map(|(_, c)| header_text(c)).map(|h| (*col, h))
+            .map(|(col, cells)| {
+                // A date heads a period column: the column's only date, over
+                // figures. Where dates are the records (due dates, or dates
+                // among other entries) they must not key the column.
+                let one_date = cells.iter().filter(|(_, c)| date(c).is_some()).take(2).count() == 1;
+                let figure = |c: &Cell| matches!(c.value, Value::Number(_)) && date(c).is_none();
+                let texts = cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (r, _))| top.contains(r))
+                    .filter_map(|(i, (_, c))| match date(c) {
+                        Some(d) => (one_date && cells.get(i + 1).is_some_and(|(_, next)| figure(next))).then_some(d),
+                        None => header_text(c),
+                    })
+                    .collect();
+                (*col, texts)
             })
             .collect();
         Self { sheet, rows, cols, headers }
@@ -737,7 +751,7 @@ impl<'a> Grid<'a> {
     /// header comes first because in a text column the nearest text above
     /// is usually the previous record, not a heading.
     fn column_label(&self, row: u32, col: u32) -> Option<String> {
-        if let Some(header) = self.headers.get(&col) {
+        if let Some(header) = self.headers.get(&col).and_then(|h| h.first()) {
             return Some(header.clone());
         }
         let below = self.sheet.rows.partition_point(|r| r.index < row);
@@ -753,12 +767,10 @@ impl<'a> Grid<'a> {
     }
 
     fn column_items(&self) -> Vec<Item> {
-        let header_rows: HashSet<u32> = self.rows.iter().take(HEADER_ROWS).map(|r| r.index).collect();
         self.cols
             .iter()
-            .map(|(_, cells)| {
-                let header: Vec<String> =
-                    cells.iter().filter(|(r, _)| header_rows.contains(r)).filter_map(|(_, c)| header_text(c)).collect();
+            .map(|(col, cells)| {
+                let header = self.headers.get(col).map(Vec::as_slice).unwrap_or_default();
                 let mut tokens: Vec<u64> = cells
                     .iter()
                     .flat_map(|(r, c)| {
