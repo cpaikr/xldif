@@ -1,7 +1,8 @@
 //! Reads a workbook package into the [`Workbook`] model: sheet order,
 //! visibility and kind, defined names, calculation settings, the date
-//! system, and every written cell's value, formula, and style index, with
-//! the sheet objects [`crate::sheet_objects`] parses.
+//! system, the files external links name, and every written cell's value,
+//! formula, and style index, with the sheet objects
+//! [`crate::sheet_objects`] parses.
 //!
 //! Content the model has no place for (charts, tables, pivot tables,
 //! protection, and the rest of [`Notes::unread`]) is counted while reading
@@ -152,6 +153,8 @@ struct NameEntry {
 struct WorkbookPart {
     sheets: Vec<SheetEntry>,
     names: Vec<NameEntry>,
+    /// The relationship id of each `<externalReference>`, in order.
+    external: Vec<String>,
     date1904: bool,
     calculation: Calculation,
     protected: bool,
@@ -213,13 +216,20 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
     if wb.protected {
         notes.unread("workbook protection");
     }
-    for rel in &rels {
-        match rel.kind.as_str() {
-            // Formulas keep `[1]Sheet!A1`; which file `[1]` names is here.
-            "externalLink" => notes.unread("external workbook links"),
-            "vbaProject" => notes.unread("VBA macros"),
-            _ => {}
+    for _ in rels.iter().filter(|r| r.kind == "vbaProject") {
+        notes.unread("VBA macros");
+    }
+    // Formulas keep `[1]Sheet!A1`; which file `[1]` names is here.
+    let mut external_links = Vec::with_capacity(wb.external.len());
+    for rel_id in &wb.external {
+        let target = match by_id.get(rel_id.as_str()).copied().filter(|r| !r.external) {
+            Some(rel) => external_target(pkg, &rel.target)?,
+            None => None,
+        };
+        if target.is_none() {
+            notes.unread("external links that name no workbook file");
         }
+        external_links.push(target.unwrap_or_default());
     }
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     for entry in &wb.sheets {
@@ -294,8 +304,59 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         defined_names,
         styles,
         theme,
+        external_links,
         warnings: notes.finish(),
     })
+}
+
+/// The file an external link part names: the target of the relationship its
+/// `<externalBook r:id>` points at, as written but with percent-escapes
+/// decoded. `None` for a missing part and for a link that is not a workbook.
+///
+/// Observed in workbooks Excel saved (2026-11-11): `workbook.xml` lists the
+/// links as `<externalReferences><externalReference r:id>`, and `[1]` in a
+/// formula is the first of them; each link part holds `<externalBook
+/// r:id="rId1">`, whose `externalLinkPath` relationship has
+/// `TargetMode="External"` and a target relative to the workbook's folder
+/// (`Rates.xlsx`, `elsewhere/Far%20Away.xlsx`; a source outside that folder
+/// was not tried). That Excel adds a second relationship with the absolute
+/// address (`xxl21:absoluteUrl`), which is not read. DDE and OLE links
+/// (`<ddeLink>`, `<oleLink>`, without `externalBook`) are from ECMA-376,
+/// unverified.
+fn external_target<R: Read + Seek>(pkg: &mut Package<R>, part: &str) -> Result<Option<String>, Error> {
+    let Some(text) = pkg.read_text(part)? else { return Ok(None) };
+    let mut p = Parser::new(&text, part);
+    let rel_id = loop {
+        match p.next()? {
+            Event::Start(e) if e.name == "externalLink" => {}
+            Event::Start(e) if e.name == "externalBook" => break e.attr("id").map(str::to_owned),
+            Event::Start(_) => p.skip_element()?,
+            Event::Eof => break None,
+            _ => {}
+        }
+    };
+    let Some(rel_id) = rel_id else { return Ok(None) };
+    let rels = pkg.relationships(part)?;
+    Ok(rels.into_iter().find(|r| r.id == rel_id).map(|r| percent_decode(&r.target)))
+}
+
+/// A relationship target with its `%XX` escapes decoded, so a file name
+/// reads as Excel shows it; left as written when that is not UTF-8.
+fn percent_decode(target: &str) -> String {
+    let hex = |b: Option<&u8>| b.and_then(|b| char::from(*b).to_digit(16)).and_then(|d| u8::try_from(d).ok());
+    let bytes = target.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if let (b'%', Some(hi), Some(lo)) = (bytes[i], hex(bytes.get(i + 1)), hex(bytes.get(i + 2))) {
+            out.push(hi * 16 + lo);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| target.to_owned())
 }
 
 fn truthy(v: Option<&str>) -> bool {
@@ -307,6 +368,7 @@ fn parse_workbook(text: &str, part: &str, budget: &mut Budget) -> Result<Workboo
     let mut wb = WorkbookPart {
         sheets: Vec::new(),
         names: Vec::new(),
+        external: Vec::new(),
         date1904: false,
         calculation: Calculation { mode: CalcMode::Auto, full_calc_on_load: false },
         protected: false,
@@ -357,9 +419,13 @@ fn parse_workbook(text: &str, part: &str, budget: &mut Budget) -> Result<Workboo
                     let refers_to = p.text_until_end(&[])?;
                     wb.names.push(NameEntry { name, local_sheet, refers_to, hidden });
                 }
+                "externalReference" => {
+                    budget.take()?;
+                    wb.external.push(e.attr("id").unwrap_or_default().to_owned());
+                }
                 // Nothing else in workbook.xml matters yet; skip whole subtrees
                 // so their children (extLst, fileVersion…) cost nothing.
-                "sheets" | "definedNames" => {}
+                "sheets" | "definedNames" | "externalReferences" => {}
                 "workbookProtection" => {
                     wb.protected = true;
                     p.skip_element()?;

@@ -24,6 +24,7 @@ use serde::Serialize;
 use crate::align::{self, Alignment, Item, Options};
 use crate::cellref::{MAX_COL, MAX_ROW, Range, cell_name, col_name};
 use crate::formula::{self, AxisMap, SheetMap};
+use crate::links::LinkMap;
 use crate::model::{Cell, Formula, FormulaKind, Row, Sheet, Value, Warning, Workbook};
 use crate::numfmt::Formats;
 use crate::views::{JsonValue, json_value, stale_value_warnings};
@@ -88,10 +89,12 @@ pub enum Kind {
     Sheet,
     Name,
     Theme,
+    /// A link to another workbook: the file `[1]` in a formula names.
+    ExternalLink,
 }
 
 impl Kind {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Value,
         Self::Formula,
         Self::Format,
@@ -105,6 +108,7 @@ impl Kind {
         Self::Sheet,
         Self::Name,
         Self::Theme,
+        Self::ExternalLink,
     ];
 
     /// Kinds that are workbook objects rather than cells, rows, or columns.
@@ -119,6 +123,7 @@ impl Kind {
                 | Self::Sheet
                 | Self::Name
                 | Self::Theme
+                | Self::ExternalLink
         )
     }
 
@@ -133,6 +138,7 @@ impl Kind {
             Self::Sheet => "sheet",
             Self::Name => "name",
             Self::Theme => "theme",
+            Self::ExternalLink => "externalLink",
             Self::Value => "value",
             Self::Formula => "formula",
             Self::Row => "row",
@@ -308,7 +314,8 @@ pub struct Comparison {
     pub other: Side,
     pub summary: Summary,
     pub sheets: Vec<SheetComparison>,
-    /// Workbook-level changes: defined names and the theme.
+    /// Workbook-level changes: defined names, the theme, and the files
+    /// external links name.
     pub objects: Vec<Change>,
     #[serde(skip)]
     pub warnings: Vec<Warning>,
@@ -365,7 +372,8 @@ pub fn compare(
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
     let date_offsets = (base.date1904 != other.date1904).then(|| (date_offset(base), date_offset(other)));
-    let shared = Shared { maps: &maps, inverse: &inverse, options, formats, date_offsets };
+    let links = LinkMap::new(&base.external_links, &other.external_links);
+    let shared = Shared { maps: &maps, inverse: &inverse, options, formats, date_offsets, links: &links };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
         let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
@@ -412,7 +420,8 @@ pub fn compare(
             sheets.push(lone_sheet(id, Status::OnlyOther, &o.name));
         }
     }
-    let objects = workbook_objects(base, other, &maps);
+    let mut objects = workbook_objects(base, other, &maps, &links);
+    objects.extend(crate::links::changes(&base.external_links, &other.external_links));
     let mut summary = summarize(&sheets);
     summary.formulas_adjusted = adjusted;
     summary.objects += objects.len();
@@ -428,7 +437,12 @@ pub fn compare(
 
 /// Defined names (compared by name and scope, their references carried
 /// through the alignments like formulas) and the theme.
-fn workbook_objects(base: &Workbook, other: &Workbook, maps: &HashMap<String, SheetMap>) -> Vec<Change> {
+fn workbook_objects(
+    base: &Workbook,
+    other: &Workbook,
+    maps: &HashMap<String, SheetMap>,
+    links: &LinkMap,
+) -> Vec<Change> {
     let blank = || Change {
         id: String::new(),
         kind: Kind::Name,
@@ -461,14 +475,16 @@ fn workbook_objects(base: &Workbook, other: &Workbook, maps: &HashMap<String, Sh
         match other_names.get(&k) {
             Some(o) => {
                 matched.insert(k.clone());
-                let (tb, to) = (formula::tokenize(&n.refers_to), formula::tokenize(&o.refers_to));
-                let moved = formula::remap(&tb, &workbook_scope, |s| maps.get(&s.to_lowercase()));
+                let (stored, to) = (formula::tokenize(&n.refers_to), formula::tokenize(&o.refers_to));
+                let relinked = links.relink(&stored);
+                let tb = relinked.as_deref().unwrap_or(&stored);
+                let moved = formula::remap(tb, &workbook_scope, |s| maps.get(&s.to_lowercase()));
                 if !formula::same(&moved, &to) {
                     out.push(Change {
                         id: format!("name:{}", label(n)),
                         base: Some(loc(n)),
                         other: Some(loc(o)),
-                        expected: (!formula::same(&moved, &tb)).then(|| formula::render(&moved)),
+                        expected: (!formula::same(&moved, &stored)).then(|| formula::render(&moved)),
                         properties: vec![Property {
                             name: "refersTo".into(),
                             base: n.refers_to.clone(),
@@ -1034,10 +1050,14 @@ fn diff_formulas(
             FormulaDiff::Changed { expected: None, moved: None, base: text(b), other: text(o) }
         }
         (Some(fb), Some(fo)) => {
-            let (tb, to) = (formula::tokenize(&fb.text), formula::tokenize(&fo.text));
+            let (stored, to) = (formula::tokenize(&fb.text), formula::tokenize(&fo.text));
+            // External workbooks are numbered per workbook, so the base
+            // formula is read in the other workbook's numbering first.
+            let relinked = shared.links.relink(&stored);
+            let tb = relinked.as_deref().unwrap_or(&stored);
             // The adjusted base formula is what the other side should read.
-            let moved = formula::remap(&tb, this, |name| maps.get(&name.to_lowercase()));
-            let unchanged = formula::same(&tb, &to);
+            let moved = formula::remap(tb, this, |name| maps.get(&name.to_lowercase()));
+            let unchanged = formula::same(tb, &to);
             // Unchanged text whose address now holds a cell that came from
             // another row or column: a deleted row's place taken by the row
             // below it. This also catches a removed blank row, which the
@@ -1047,8 +1067,8 @@ fn diff_formulas(
                 if unchanged { FormulaDiff::Same } else { FormulaDiff::Adjusted }
             } else if unchanged
                 && !displaced
-                && !formula::widens(&tb, &moved)
-                && !formula::retargets(&tb, this, |name| maps.get(&name.to_lowercase()))
+                && !formula::widens(tb, &moved)
+                && !formula::retargets(tb, this, |name| maps.get(&name.to_lowercase()))
             {
                 // Unchanged text where the adjustment only reflects a deleted
                 // row at a range's edge: a row edited in place can align as
@@ -1058,7 +1078,7 @@ fn diff_formulas(
                 // line) or when a referenced cell that still exists moved.
                 FormulaDiff::Same
             } else {
-                let expected = (!formula::same(&moved, &tb)).then(|| formula::render(&moved));
+                let expected = (!formula::same(&moved, &stored)).then(|| formula::render(&moved));
                 FormulaDiff::Changed { expected, moved: Some(moved), base: text(Some(fb)), other: text(Some(fo)) }
             }
         }
@@ -1097,6 +1117,8 @@ struct Shared<'a> {
     /// When the workbooks use different date systems: what to add to each
     /// side's serials to put them on one scale.
     date_offsets: Option<(f64, f64)>,
+    /// The base workbook's external links in the other's numbering.
+    links: &'a LinkMap,
 }
 
 /// What to add to a workbook's date serials to get 1900-system serials: the

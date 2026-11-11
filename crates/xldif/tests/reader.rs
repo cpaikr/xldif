@@ -174,7 +174,14 @@ fn book_with_unread_content() -> Vec<u8> {
     let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
     RawBook::new()
         .workbook_before(r#"<workbookProtection lockStructure="1"/>"#)
+        // A link to a program's data, not to a workbook: it names no file.
         .workbook_rel("externalLink", "externalLinks/externalLink1.xml")
+        .workbook_after(r#"<externalReferences><externalReference r:id="rIdX1"/></externalReferences>"#)
+        .part(
+            "xl/externalLinks/externalLink1.xml",
+            format!(r#"<externalLink xmlns="{main}"><ddeLink ddeService="feed" ddeTopic="quotes"/></externalLink>"#)
+                .as_bytes(),
+        )
         .workbook_rel("vbaProject", "vbaProject.bin")
         .sheet_part(
             "Data",
@@ -202,7 +209,7 @@ fn content_the_model_does_not_hold_is_named_in_one_warning() {
     assert_eq!(unread.len(), 1, "{:?}", book.warnings);
     for what in [
         "workbook protection (1)",
-        "external workbook links (1)",
+        "external links that name no workbook file (1)",
         "VBA macros (1)",
         "sheet protection (1)",
         "extension lists (newer conditional formats and validations, sparklines, slicers) (1)",
@@ -218,6 +225,50 @@ fn content_the_model_does_not_hold_is_named_in_one_warning() {
     assert!(!unread[0].contains("filter"), "{}", unread[0]);
     // The cells beside that content are still read.
     assert_eq!(cell(&book, "Data", 1, 1).value, Value::Number(1.0));
+    assert_eq!(book.external_links, [""]);
+}
+
+#[test]
+fn external_links_are_read_in_the_order_formulas_number_them() {
+    // The link parts are numbered in the order they were added; the
+    // workbook lists them in another, and that list is what `[1]` counts.
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    let link = |n: u32, target: &str| {
+        let part =
+            format!(r#"<externalLink xmlns="{main}"><externalBook xmlns:r="{rel}" r:id="rId1"/></externalLink>"#);
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="{rel}/externalLinkPath" Target="file:///C:\elsewhere\{target}" TargetMode="External"/><Relationship Id="rId1" Type="{rel}/externalLinkPath" Target="{target}" TargetMode="External"/></Relationships>"#
+        );
+        [
+            (format!("xl/externalLinks/externalLink{n}.xml"), part.into_bytes()),
+            (format!("xl/externalLinks/_rels/externalLink{n}.xml.rels"), rels.into_bytes()),
+        ]
+    };
+    let mut book = RawBook::new()
+        .sheet("S", r#"<row r="1"><c r="A1"><f>[1]Rates!A1</f><v>2</v></c></row>"#)
+        .workbook_rel("externalLink", "externalLinks/externalLink1.xml")
+        .workbook_rel("externalLink", "externalLinks/externalLink2.xml")
+        .workbook_after(
+            r#"<externalReferences><externalReference r:id="rIdX2"/><externalReference r:id="rIdX1"/><externalReference r:id="rIdMissing"/></externalReferences>"#,
+        );
+    for (name, bytes) in link(1, "Price%20list%20%EA%B0%80.xlsx").into_iter().chain(link(2, "rates/Rates.xlsx")) {
+        book = book.part(&name, &bytes);
+    }
+    let book = read_bytes(book.build()).unwrap();
+    // Escapes are decoded; the absolute alternative Excel also writes is
+    // not the link's target; a reference to no part names no file.
+    assert_eq!(book.external_links, ["rates/Rates.xlsx", "Price list 가.xlsx", ""]);
+    let unread: Vec<&str> =
+        book.warnings.iter().filter(|w| w.code == "not_compared").map(|w| w.message.as_str()).collect();
+    assert_eq!(unread.len(), 1, "{:?}", book.warnings);
+    assert!(unread[0].ends_with("external links that name no workbook file (1)"), "{}", unread[0]);
+
+    // Links that all name a workbook leave nothing unread.
+    let linked = RawBook::new().sheet("S", "").external_link("Prices.xlsx").external_link("Rates.xlsx").build();
+    let linked = read_bytes(linked).unwrap();
+    assert_eq!(linked.external_links, ["Prices.xlsx", "Rates.xlsx"]);
+    assert!(linked.warnings.is_empty(), "{:?}", linked.warnings);
 }
 
 #[test]

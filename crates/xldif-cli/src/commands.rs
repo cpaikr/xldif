@@ -85,6 +85,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                     Kind::Sheet => diff::Kind::Sheet,
                     Kind::Name => diff::Kind::Name,
                     Kind::Theme => diff::Kind::Theme,
+                    Kind::ExternalLink => diff::Kind::ExternalLink,
                     Kind::Row => diff::Kind::Row,
                     Kind::Column => diff::Kind::Column,
                 })
@@ -221,6 +222,9 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
     for n in &i.defined_names {
         let scope = escape(n.scope.as_deref().unwrap_or("workbook"));
         let _ = writeln!(out, "name\t{}\t{scope}\t{}", escape(&n.name), escape(&n.refers_to));
+    }
+    for (n, target) in (1..).zip(&i.external_links) {
+        let _ = writeln!(out, "link\t[{n}]\t{}", escape(target));
     }
     write_warnings(&mut out, warnings);
     out

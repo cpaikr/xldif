@@ -22,6 +22,8 @@ pub struct RawBook {
     workbook_after: String,
     workbook_type: &'static str,
     workbook_rels: String,
+    /// `<externalReference>` entries, in the order formulas number them.
+    external_references: String,
     extra_parts: Vec<(String, Vec<u8>)>,
 }
 
@@ -40,6 +42,7 @@ impl RawBook {
             workbook_after: String::new(),
             workbook_type: WORKBOOK_TYPE,
             workbook_rels: String::new(),
+            external_references: String::new(),
             extra_parts: Vec::new(),
         }
     }
@@ -64,6 +67,25 @@ impl RawBook {
         let n = self.workbook_rels.matches("<Relationship ").count() + 1;
         let _ = write!(self.workbook_rels, r#"<Relationship Id="rIdX{n}" Type="{REL}/{kind}" Target="{target}"/>"#);
         self
+    }
+
+    /// Adds a link to another workbook, as Excel writes one: formulas name
+    /// it by position (`[1]` is the first link added), and the link part's
+    /// `externalBook` relationship holds `target`.
+    #[must_use]
+    pub fn external_link(mut self, target: &str) -> Self {
+        let n = self.external_references.matches("<externalReference ").count() + 1;
+        let rel = self.workbook_rels.matches("<Relationship ").count() + 1;
+        let _ = write!(self.external_references, r#"<externalReference r:id="rIdX{rel}"/>"#);
+        let part = format!(
+            r#"<externalLink xmlns="{MAIN_NS}"><externalBook xmlns:r="{REL}" r:id="rId1"><sheetNames><sheetName val="Sheet1"/></sheetNames></externalBook></externalLink>"#
+        );
+        let rels = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/externalLinkPath" Target="{target}" TargetMode="External"/></Relationships>"#
+        );
+        self.workbook_rel("externalLink", &format!("externalLinks/externalLink{n}.xml"))
+            .part(&format!("xl/externalLinks/externalLink{n}.xml"), part.as_bytes())
+            .part(&format!("xl/externalLinks/_rels/externalLink{n}.xml.rels"), rels.as_bytes())
     }
 
     /// Adds a sheet whose whole part is `xml`, as written.
@@ -143,8 +165,12 @@ impl RawBook {
         rels.push_str("</Relationships>");
         types.push_str("</Types>");
         let (before, after) = (&self.workbook_before, &self.workbook_after);
+        let external = match self.external_references.as_str() {
+            "" => String::new(),
+            references => format!("<externalReferences>{references}</externalReferences>"),
+        };
         let workbook = format!(
-            r#"<workbook xmlns="{MAIN_NS}" xmlns:r="{REL}">{before}<sheets>{sheets}</sheets>{after}</workbook>"#
+            r#"<workbook xmlns="{MAIN_NS}" xmlns:r="{REL}">{before}<sheets>{sheets}</sheets>{external}{after}</workbook>"#
         );
         let root_rels = format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#

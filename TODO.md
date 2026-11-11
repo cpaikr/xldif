@@ -59,8 +59,10 @@ the first two.
    - Between a 1900 and a 1904 workbook, date cells compare by the date
      they show, but the alignment's tokens are still the serials, so equal
      dates do not help pair rows there. It belongs with the alignment item.
-   - External workbook links are compared by index (`[1]`), not by the file
-     they name.
+   - External links are compared by the file they name in cell formulas
+     and defined names, but validation and conditional-format formulas
+     still compare the number as written, and so do the alignment's
+     formula tokens (a renumbered link makes a formula another token).
    - The release workflow builds Linux and macOS archives nobody uses.
 
 ## Features
@@ -89,7 +91,12 @@ verified. See [PLAN.md](PLAN.md#risks-to-watch) for details:
 - format facts: row `customFormat`, `dxf` `bgColor`, the threaded-comment
   fallback, and dynamic-array `cm`;
 - built-in number formats 27–36 and 50–58 other than 31 (only 31 has been
-  observed in Excel);
+  observed in Excel), and the currency and accounting formats 5–8 and 41–44
+  under regional settings other than Korean;
 - the `oleObject` and `control` relationship kinds named by the
-  `not_compared` warning (`drawing`, `table`, `chartsheet`, `externalLink`,
-  `ctrlProp`, and `package` were observed in Excel-saved files).
+  `not_compared` warning (`drawing`, `table`, `chartsheet`, `ctrlProp`, and
+  `package` were observed in Excel-saved files);
+- external links: the target Excel writes for a source outside the
+  workbook's folder (only sources in the folder and a subfolder were
+  observed, both relative), and DDE and OLE links, which are read as links
+  that name no workbook file.

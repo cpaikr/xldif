@@ -10,7 +10,8 @@ No Excel installation is needed.
 reports value, formula, and format changes; inserted, deleted, and moved
 rows, columns, and sheets; row and column layout; and merges, comments,
 data validation, conditional formatting, hyperlinks, sheet visibility,
-defined names, and the theme. `--format html -o report.html` writes a
+defined names, the theme, and the files external links name.
+`--format html -o report.html` writes a
 self-contained side-by-side report for people, and the
 [`xldif` agent skill](skills/xldif/SKILL.md) teaches agents to drive the
 CLI. See [PLAN.md](PLAN.md).
@@ -18,8 +19,8 @@ CLI. See [PLAN.md](PLAN.md).
 ## Commands
 
 - `xldif inspect BOOK` shows sheets (kind, visibility, used range, cell and
-  formula counts), defined names, calculation settings, and the date system.
-  It prints no cell contents.
+  formula counts), defined names, calculation settings, the date system, and
+  the files external links name. It prints no cell contents.
 - `xldif compare BASE OTHER [--sheet NAME] [--kind value,formula,format,...]
   [--limit N] [--all] [--tolerance X] [--align content|position]` reports
   what changed. Rows and columns pair by their labels and values, so an
@@ -28,7 +29,9 @@ CLI. See [PLAN.md](PLAN.md).
   inferred row and column labels. Formulas are compared after Excel's own
   adjustment for inserted and deleted rows, so `=D30` becoming `=D31` under
   an inserted row is not a change, while a rewrite shows both formulas and
-  the one Excel would have kept (`expected`). `--format html -o FILE`
+  the one Excel would have kept (`expected`). A reference to another
+  workbook (`[1]Prices!A1`) is compared by the file its number names.
+  `--format html -o FILE`
   writes the side-by-side report instead (it never replaces a compared
   workbook, and replaces another file only with `--force`).
 - `xldif cells BOOK --sheet NAME [--range A1:F40] [--limit N]` lists cells

@@ -78,8 +78,10 @@ them, including what the first plan named and the code does not do.
   - Workbook level: `workbook.xml` (sheet order, visibility, defined names,
     `calcPr`, and the `workbookPr date1904` flag), shared strings (rich text
     flattened to its text, phonetic runs dropped), `styles.xml` (through
-    `styles`), the theme's colour scheme (kept as a fingerprint only), and
-    `persons.xml` for the authors of threaded comments.
+    `styles`), the theme's colour scheme (kept as a fingerprint only),
+    `persons.xml` for the authors of threaded comments, and the file each
+    external link names (`externalReferences`, in the order formulas
+    number them).
   - Each sheet's XML: cells, types, cached values, and formulas, and through
     `sheet_objects` merges, row and column records, data validation,
     conditional formatting, hyperlinks, legacy notes, and threaded comments.
@@ -122,6 +124,8 @@ them, including what the first plan named and the code does not do.
     (relative parts as offsets) for folding and for alignment tokens.
 - **`align`:** row and column sequence alignment and move detection (see
   Alignment).
+- **`links`:** external workbook links paired by the file they name, and
+  a base formula's link numbers rewritten to the other workbook's.
 - **`diff`, `diff_objects`:** sheet pairing, column-then-row alignment of
   each pair, value and formula changes, formats, layout, and objects over
   the alignment, plus context labels, change folding, and the summary.
@@ -168,7 +172,8 @@ Commands:
 
 - `xldif inspect BOOK` gives an agent its first look without cell contents:
   sheets (order, visibility, used range, cell, formula, and comment counts),
-  defined names, calculation settings, date system, and reader warnings.
+  defined names, calculation settings, date system, the files external
+  links name, and reader warnings.
 - `xldif compare BASE OTHER [--format json|text|html] [-o FILE] [--sheet NAME]
   [--kind KIND,...] [--limit N (default 500)] [--all] [--tolerance X]
   [--align content|position] [--force]`
@@ -185,7 +190,8 @@ rows are `row` changes). `xldif compare --help` describes the output.
 
 There is one `kind` vocabulary, shared by `--kind` and the output: `value`,
 `formula`, `format`, `row`, `column`, `sheet`, `name`, `comment`, `merge`,
-`validation`, `conditionalFormat`, `hyperlink`, `theme`.
+`validation`, `conditionalFormat`, `hyperlink`, `theme`, `externalLink`
+(`--kind external-link`).
 
 ```jsonc
 {
@@ -348,6 +354,16 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - `#REF!` (and `Sheet!#REF!`) from a deleted reference is an adjustment.
     3-D references (`Jan:Dec!B5`) and external ones (`[1]Prices!A1`) shift
     in shared formulas but never follow this workbook's alignment.
+  - An external reference is compared by the file its number names, not by
+    the number, which is only a position in each workbook's list of links.
+    Links pair by target (without case); the base formula is read in the
+    other workbook's numbering, so `[1]` against `[2]` for one file is no
+    change, and `[1]` against `[1]` for two files is one. A file the other
+    workbook does not link to is written by name in `expected`
+    (`[FY2024.xlsx]Sheet1!A1`), since no number there means it. This covers
+    cell formulas and defined names, including external names
+    (`[1]!Rate`); validation and conditional-format formulas still compare
+    the number as written.
   - Blank rows between two paired rows are matched in order with the other
     side's blank rows in the same gap, so a spacer row next to an inserted
     or deleted line maps where Excel moved it.
@@ -369,6 +385,14 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
 - **Workbook objects:**
   - Sheets: onlyBase, onlyOther, renamed, reordered, visibility.
   - Defined names, compared by name and scope, with `refersTo`.
+  - External links (`externalLink`), compared by the file each names: one
+    linked on a single side is `onlyBase` or `onlyOther`; a number that
+    names another file on each side is one `changed` with both targets.
+    The id carries the numbers formulas use
+    (`externalLink:<base>:<other>`), and `inspect` lists each workbook's
+    links in that order. The target is the link part's `externalBook`
+    relationship as Excel writes it, usually relative to the workbook's
+    folder, so the same file reached by another path is another link.
   - Comments:
     - A threaded comment is compared as its thread: author, resolved through
       `persons.xml`, and each reply's text.

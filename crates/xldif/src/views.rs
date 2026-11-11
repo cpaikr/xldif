@@ -35,6 +35,9 @@ pub struct Inspection {
     pub calculation: Calculation,
     pub sheets: Vec<SheetSummary>,
     pub defined_names: Vec<DefinedName>,
+    /// The file each external link names, in the order formulas number
+    /// them: `[1]` is the first. Empty for a link that names no workbook.
+    pub external_links: Vec<String>,
 }
 
 fn summarize(index: usize, sheet: &Sheet) -> SheetSummary {
@@ -77,6 +80,7 @@ pub fn inspect(file: &str, book: &Workbook) -> (Inspection, Vec<Warning>) {
         calculation: book.calculation,
         sheets,
         defined_names: book.defined_names.clone(),
+        external_links: book.external_links.clone(),
     };
     (inspection, warnings)
 }
