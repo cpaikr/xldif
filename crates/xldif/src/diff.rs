@@ -356,11 +356,15 @@ pub fn compare(
             (base.sheets[*bi].name.to_lowercase(), al.sheet_map(renamed_to))
         })
         .collect();
+    // The same maps read from the other side, keyed by the other workbook's
+    // sheet names: what an address there held on the base side.
+    let inverse: HashMap<String, SheetMap> =
+        aligned.iter().map(|(_, oi, _, _, _, al)| (other.sheets[*oi].name.to_lowercase(), al.inverse_map())).collect();
 
     let mut sheets = Vec::new();
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
-    let shared = Shared { maps: &maps, options, formats };
+    let shared = Shared { maps: &maps, inverse: &inverse, options, formats };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
         let Some((_, oi, renamed, gb, go, al)) = aligned.iter().find(|a| a.0 == bi) else {
@@ -370,13 +374,14 @@ pub fn compare(
         paired_other[*oi] = true;
         let o = &other.sheets[*oi];
         let this = &maps[&b.name.to_lowercase()];
-        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, this, &shared);
+        let back = &inverse[&o.name.to_lowercase()];
+        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, (this, back), &shared);
         adjusted += n_adjusted;
         let (bs, os) = (
             crate::diff_objects::Side { sheet: b, styles: &base.styles },
             crate::diff_objects::Side { sheet: o, styles: &other.styles },
         );
-        changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, &al.inverse_map()));
+        changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, back));
         changes.sort_by_key(order_key);
         if al.fell_back {
             warnings.push(Warning {
@@ -1014,12 +1019,13 @@ enum FormulaDiff {
 fn diff_formulas(
     fb: Option<&Formula>,
     fo: Option<&Formula>,
-    this: &SheetMap,
-    maps: &HashMap<String, SheetMap>,
+    (this, back): (&SheetMap, &SheetMap),
+    shared: &Shared,
 ) -> FormulaDiff {
     fn usable(f: Option<&Formula>) -> Option<&Formula> {
         f.filter(|f| f.kind != FormulaKind::DataTable && !f.text.is_empty())
     }
+    let (maps, inverse) = (shared.maps, shared.inverse);
     let text = |f: Option<&Formula>| f.map(|f| f.text.clone());
     match (usable(fb), usable(fo)) {
         (None, None) => FormulaDiff::Same,
@@ -1030,9 +1036,16 @@ fn diff_formulas(
             let (tb, to) = (formula::tokenize(&fb.text), formula::tokenize(&fo.text));
             // The adjusted base formula is what the other side should read.
             let moved = formula::remap(&tb, this, |name| maps.get(&name.to_lowercase()));
-            if formula::same(&moved, &to) {
-                if formula::same(&tb, &to) { FormulaDiff::Same } else { FormulaDiff::Adjusted }
-            } else if formula::same(&tb, &to)
+            let unchanged = formula::same(&tb, &to);
+            // Unchanged text whose address now holds a cell that came from
+            // another row or column: a deleted row's place taken by the row
+            // below it. This also catches a removed blank row, which the
+            // maps carry to the same number and so call no adjustment.
+            let displaced = unchanged && formula::retargets(&to, back, |name| inverse.get(&name.to_lowercase()));
+            if formula::same(&moved, &to) && !displaced {
+                if unchanged { FormulaDiff::Same } else { FormulaDiff::Adjusted }
+            } else if unchanged
+                && !displaced
                 && !formula::widens(&tb, &moved)
                 && !formula::retargets(&tb, this, |name| maps.get(&name.to_lowercase()))
             {
@@ -1074,6 +1087,9 @@ struct FormulaEdit {
 struct Shared<'a> {
     /// Every sheet's row and column maps, for references across sheets.
     maps: &'a HashMap<String, SheetMap>,
+    /// Those maps from the other side back to the base side, by the other
+    /// workbook's sheet names.
+    inverse: &'a HashMap<String, SheetMap>,
     options: CompareOptions,
     /// The base and other workbooks' number formats.
     formats: (Formats<'a>, Formats<'a>),
@@ -1084,10 +1100,10 @@ fn sheet_changes(
     gb: &Grid,
     go: &Grid,
     al: &Aligned,
-    this: &SheetMap,
+    (this, back): (&SheetMap, &SheetMap),
     shared: &Shared,
 ) -> (Vec<Change>, usize) {
-    let Shared { maps, options, formats } = shared;
+    let Shared { options, formats, .. } = shared;
     let (col_al, row_al) = (&al.cols, &al.rows);
     let mut changes = Vec::new();
     for &c in &col_al.lone_base {
@@ -1146,7 +1162,7 @@ fn sheet_changes(
         for (cb, co) in cols {
             let (cell_b, cell_o) = (gb.cell(rb, cb), go.cell(ro, co));
             let (fb, fo) = (cell_b.and_then(|c| c.formula.as_ref()), cell_o.and_then(|c| c.formula.as_ref()));
-            match diff_formulas(fb, fo, this, maps) {
+            match diff_formulas(fb, fo, (this, back), shared) {
                 FormulaDiff::Same => {}
                 FormulaDiff::Adjusted => adjusted += 1,
                 FormulaDiff::Changed { expected, moved, base, other } => {

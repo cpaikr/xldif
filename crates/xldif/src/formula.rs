@@ -161,8 +161,9 @@ pub fn tokenize(formula: &str) -> Vec<Token> {
             // stays opaque.
             let book = bracketed_len(rest);
             let name = word_len(&rest[book..]);
-            let external = c == '['
-                && rest[1..book.saturating_sub(1)].bytes().all(|b| b.is_ascii_digit())
+            // An unterminated `[` has no index to read.
+            let index = rest[..book].strip_prefix('[').and_then(|r| r.strip_suffix(']'));
+            let external = index.is_some_and(|i| i.bytes().all(|b| b.is_ascii_digit()))
                 && name > 0
                 && rest[book + name..].starts_with('!');
             if let Some((token, len)) =
@@ -388,7 +389,9 @@ pub fn same(a: &[Token], b: &[Token]) -> bool {
 
 /// Whether a reference in the formula points at a row or column that exists
 /// on both sides (paired or moved) but under a different number: the cell
-/// it read moved, so unchanged text now reads something else.
+/// it read moved, so unchanged text now reads something else. With the maps
+/// from the other side back to the base side, the same question asks whether
+/// the address the formula reads now was another row or column before.
 pub fn retargets<'a>(tokens: &[Token], this: &SheetMap, sheet: impl Fn(&str) -> Option<&'a SheetMap>) -> bool {
     let moved = |n: u32, axis: &AxisMap| axis.exact(n).is_some_and(|m| m != n);
     tokens.iter().any(|t| {
@@ -740,6 +743,33 @@ mod tests {
 
     fn round_trip(f: &str) {
         assert_eq!(render(&tokenize(f)), f, "{f}");
+    }
+
+    /// Every string of up to four of the characters the tokenizer branches
+    /// on: none may panic, in the tokenizer or in what reads its tokens.
+    #[test]
+    fn no_formula_text_panics() {
+        let alphabet = ['[', ']', '\'', '"', '!', '#', ':', '$', 'A', '1', '(', ' ', 'é'];
+        let mut texts = vec![String::new()];
+        for _ in 0..4 {
+            let longer: Vec<String> =
+                texts.iter().flat_map(|t| alphabet.iter().map(move |c| format!("{t}{c}"))).collect();
+            texts.extend(longer);
+            texts.sort_unstable();
+            texts.dedup();
+        }
+        let map = SheetMap {
+            renamed_to: None,
+            rows: AxisMap::new(vec![(1, 2)], Vec::new(), Vec::new(), vec![1], 100),
+            cols: AxisMap::identity(100),
+        };
+        for text in &texts {
+            let tokens = tokenize(text);
+            let _ = render(&tokens);
+            let _ = super::relative_form(&tokens, 1, 1);
+            let _ = render(&shift(&tokens, -1, -1));
+            let _ = render(&remap(&tokens, &map, |_| None));
+        }
     }
 
     #[test]

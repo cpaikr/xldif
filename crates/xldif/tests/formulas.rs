@@ -212,3 +212,69 @@ fn unchanged_text_that_now_reads_a_moved_cell_is_a_change() {
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].expected.as_deref(), Some("B3"));
 }
+
+const CHECKS: Grid =
+    &[&["Item", "Amount"], &["Revenue", "100"], &["Cost", "100"], &["Tax", "5"], &["Check", "=B2|100"]];
+
+#[test]
+fn unchanged_text_over_a_deleted_row_reads_the_row_that_took_its_place() {
+    // Revenue was deleted and Cost moved up into row 2: `=B2` reads Cost now,
+    // and its cached value hides that.
+    let other: Grid = &[CHECKS[0], CHECKS[2], CHECKS[3], &["Check", "=B2|100"]];
+    let c = run(&[("PL", CHECKS)], &[("PL", other)]);
+    let f = formulas(&c);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].id, "s0:formula:B5:B4");
+    assert_eq!(f[0].expected.as_deref(), Some("#REF!"));
+    assert_eq!(c.summary.value, 0);
+}
+
+#[test]
+fn unchanged_text_over_a_row_replaced_in_place_is_not_a_change() {
+    // Row 2 holds an unrelated line on each side: nothing else moved, so the
+    // formula still reads row 2 and was not touched.
+    let other: Grid = &[CHECKS[0], &["Grants", "7"], CHECKS[2], CHECKS[3], &["Check", "=B2|7"]];
+    let c = run(&[("PL", CHECKS)], &[("PL", other)]);
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+}
+
+#[test]
+fn a_malformed_formula_compares_as_written() {
+    let base: Grid = &[&["x", "1"], &["y", "=A1+1|2"]];
+    for broken in ["=A1+[|2", "=A1+[é|2", "='|2", "=\"|2", "=A1+#|2"] {
+        let other: Grid = &[&["x", "1"], &["y", broken]];
+        let c = run(&[("S", base)], &[("S", other)]);
+        assert_eq!(formulas(&c).len(), 1, "{broken}");
+        let same = run(&[("S", other)], &[("S", other)]);
+        assert!(formulas(&same).is_empty(), "{broken}");
+    }
+}
+
+#[test]
+fn unchanged_text_over_a_removed_blank_row_is_a_change() {
+    // The spacer in row 5 was removed and D moved up into it: `=B5` read
+    // nothing and now reads D; the total now covers D as well.
+    let base: Grid = &[
+        &["Item", "Amount", "", "=B5|0"],
+        &["A", "1"],
+        &["B", "2"],
+        &["C", "3", "", "=SUM(B2:B5)|6"],
+        &[],
+        &["D", "4"],
+    ];
+    let other: Grid =
+        &[&["Item", "Amount", "", "=B5|4"], &["A", "1"], &["B", "2"], &["C", "3", "", "=SUM(B2:B5)|10"], &["D", "4"]];
+    let c = run(&[("S", base)], &[("S", other)]);
+    let f = formulas(&c);
+    assert_eq!(f.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s0:formula:D1:D1", "s0:formula:D4:D4"]);
+}
+
+#[test]
+fn unchanged_text_reading_another_sheet_follows_that_sheets_deleted_row() {
+    let notes: Grid = &[&["Revenue per PL", "=PL!B2|100"]];
+    let other: Grid = &[CHECKS[0], CHECKS[2], CHECKS[3], &["Check", "=B3|5"]];
+    let c = run(&[("PL", CHECKS), ("Notes", notes)], &[("PL", other), ("Notes", notes)]);
+    let f: Vec<&Change> = formulas(&c).into_iter().filter(|c| c.id.starts_with("s1:")).collect();
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].expected.as_deref(), Some("PL!#REF!"));
+}
