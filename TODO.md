@@ -56,6 +56,9 @@ the first two.
      property. Found while fixing ids 5–8 and 41–44, which now render as
      Korean Excel does (`locale_builtin` in
      [numfmt.rs](crates/xldif/src/numfmt.rs)).
+   - Built-in number format 47 is `mm:ss.0` in Excel (observed 2026-11-11:
+     `NumberFormat` and `00:00.0` for a bare id 47); xldif has ECMA-376's
+     `mmss.0` in [styles.rs](crates/xldif/src/styles.rs) and shows `0000.0`.
    - Between a 1900 and a 1904 workbook, date cells compare by the date
      they show, but the alignment's tokens are still the serials, so equal
      dates do not help pair rows there. It belongs with the alignment item.
