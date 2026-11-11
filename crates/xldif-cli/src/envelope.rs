@@ -37,6 +37,19 @@ impl Failure {
         Self { code: "invalid_invocation", message, hint: Some(hint), usage: true }
     }
 
+    /// A command panicked: a bug in xldif, reported like any other failure.
+    pub fn internal(detail: &str) -> Self {
+        Self {
+            code: "internal_error",
+            message: format!("xldif hit an internal error: {detail}"),
+            hint: Some(
+                "this is a bug in xldif, not a problem with the invocation; the message may quote workbook text"
+                    .to_owned(),
+            ),
+            usage: false,
+        }
+    }
+
     pub const fn exit_code(&self) -> u8 {
         if self.usage { 2 } else { 1 }
     }

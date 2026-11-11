@@ -51,6 +51,9 @@ are not changes.
 - A formula whose text did not change but now reads a different cell, or a
   total that no longer covers an inserted row, is listed with `expected`;
   explain it as "Excel would have adjusted this to …, but it still reads …".
+  When such a change has the same formula on both sides and no `expected`,
+  a blank row or column was removed and the formula now reads the cell
+  that moved into that address.
 - Moved rows are not changes in content; mention them only when order
   matters.
 - Format-only changes are rarely material; summarize them unless asked.
@@ -70,3 +73,7 @@ are not changes.
   was deleted.
 - Warnings about stale values mean the stored results may not match the
   formulas; say that figures come from the last save.
+- A `not_compared` warning names content xldif does not read in that
+  workbook (charts, tables, pivot tables, protection, newer conditional
+  formats and validations, external link targets, macros).
+  "No changes" does not cover it; say what was left out.

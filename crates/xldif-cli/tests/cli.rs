@@ -419,3 +419,59 @@ fn cells_and_changes_carry_display_text_and_iso_dates() {
     let html = std::fs::read_to_string(&report).unwrap();
     assert!(html.contains(">2024-01-02<") && html.contains(">1,300.00<"), "the grid shows display text");
 }
+
+#[test]
+fn compare_warns_about_content_it_does_not_read() {
+    let work = Work::new();
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let protected = xldif_fixtures::raw::RawBook::new()
+        .sheet_part(
+            "S",
+            &format!(
+                r#"<worksheet xmlns="{main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><sheetProtection sheet="1"/></worksheet>"#
+            ),
+        )
+        .build();
+    let plain = xldif_fixtures::raw::RawBook::new().sheet("S", r#"<row r="1"><c r="A1"><v>1</v></c></row>"#).build();
+    let (base, other) = (work.file("plain.xlsx", &plain), work.file("protected.xlsx", &protected));
+    let env = ok(&xldif(["compare", s(&base), s(&other)]), "compare");
+    // Nothing the model holds changed, and the warning says what it leaves out.
+    assert_eq!(env["result"]["summary"]["sheetsChanged"], 0);
+    let warnings: Vec<(&str, &str)> = env["warnings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| (w["code"].as_str().unwrap(), w["message"].as_str().unwrap()))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].0, "not_compared");
+    assert!(warnings[0].1.starts_with("other: ") && warnings[0].1.ends_with("sheet protection (1)"), "{warnings:?}");
+    let inspected = ok(&xldif(["inspect", s(&other)]), "inspect");
+    assert_eq!(inspected["warnings"][0]["code"], "not_compared");
+    // The report a person reads carries it too.
+    let report = work.0.join("report.html");
+    ok(&xldif(["compare", s(&base), s(&other), "--format", "html", "-o", s(&report)]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.contains("<b>not_compared</b> other: ") && html.contains("sheet protection (1)"));
+}
+
+#[test]
+fn a_malformed_formula_does_not_break_the_contract() {
+    let work = Work::new();
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let book = |formula: &str| {
+        xldif_fixtures::raw::RawBook::new()
+            .sheet_part(
+                "S",
+                &format!(
+                    r#"<worksheet xmlns="{main}"><sheetData><row r="1"><c r="A1"><v>1</v></c><c r="B1"><f>{formula}</f><v>2</v></c></row></sheetData></worksheet>"#
+                ),
+            )
+            .build()
+    };
+    let (base, other) = (work.file("a.xlsx", &book("A1+1")), work.file("b.xlsx", &book("A1+[")));
+    let run = xldif(["compare", s(&base), s(&other)]);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+    let env = ok(&run, "compare");
+    assert_eq!(env["result"]["summary"]["formula"], 1);
+}

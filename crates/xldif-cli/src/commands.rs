@@ -69,7 +69,8 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 .into());
             }
             let comparison = diff::compare(&file_label(&base), &b, &file_label(&other), &o, options);
-            let warnings: Vec<Warning> = comparison.warnings.iter().cloned().map(Warning::from).collect();
+            let report_warnings = comparison.warnings.clone();
+            let warnings: Vec<Warning> = report_warnings.iter().cloned().map(Warning::from).collect();
             let kinds = kind
                 .into_iter()
                 .map(|k| match k {
@@ -92,7 +93,7 @@ pub fn run(command: Command) -> Result<Output, Failure> {
                 // The report shows every change and every sheet; a limit would
                 // silently hide changes from a reader who cannot see it.
                 let listing = comparison.list(&Filter { sheet, kinds, limit: None, all: true });
-                let html = xldif::html::render_html(&listing, &b, &o);
+                let html = xldif::html::render_html(&listing, &b, &o, &report_warnings);
                 let path = output.expect("checked above");
                 write_output(&path, html.as_bytes(), &[&base, &other], force)?;
                 let result = serde_json::json!({

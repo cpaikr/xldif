@@ -1,10 +1,14 @@
 //! Reads a workbook package into the [`Workbook`] model: sheet order,
 //! visibility and kind, defined names, calculation settings, the date
-//! system, and every written cell's value, formula, and style index.
+//! system, and every written cell's value, formula, and style index, with
+//! the sheet objects [`crate::sheet_objects`] parses.
 //!
-//! Formatting resolution, comments, and other objects arrive in M3.
+//! Content the model has no place for (charts, tables, pivot tables,
+//! protection, and the rest of [`Notes::unread`]) is counted while reading
+//! and reported as one `not_compared` warning, so "no changes" never
+//! silently covers it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Seek};
 use std::path::Path;
 use std::sync::Arc;
@@ -68,6 +72,68 @@ impl Budget {
     }
 }
 
+/// What reading leaves for the caller besides the model.
+#[derive(Default)]
+struct Notes {
+    warnings: Vec<Warning>,
+    /// Kinds of content present in the package that the model does not
+    /// hold, with how many times each was met.
+    unread: BTreeMap<&'static str, usize>,
+}
+
+impl Notes {
+    fn unread(&mut self, what: &'static str) {
+        *self.unread.entry(what).or_default() += 1;
+    }
+
+    /// The warnings, ending with one for unread content if there was any.
+    fn finish(mut self) -> Vec<Warning> {
+        if !self.unread.is_empty() {
+            let list: Vec<String> = self.unread.iter().map(|(what, n)| format!("{what} ({n})")).collect();
+            self.warnings.push(Warning {
+                code: "not_compared",
+                message: format!(
+                    "the workbook has content xldif does not read, so changes to it are never reported: {}",
+                    list.join(", ")
+                ),
+            });
+        }
+        self.warnings
+    }
+}
+
+/// A worksheet child element the model does not hold, by what it is.
+///
+/// Autofilters are left out on purpose: most working files have one, so
+/// naming them would make the warning routine, and what a filter does is
+/// compared anyway (its range is a defined name, the rows it hides are row
+/// layout).
+fn unread_element(name: &str) -> Option<&'static str> {
+    match name {
+        // Its `protectedRanges` only matter on a protected sheet, so the
+        // sheet is counted once.
+        "sheetProtection" => Some("sheet protection"),
+        // Newer Excel keeps some conditional formats and validations here,
+        // with sparklines and slicers.
+        "extLst" => Some("extension lists (newer conditional formats and validations, sparklines, slicers)"),
+        _ => None,
+    }
+}
+
+/// A part related to a worksheet that the model does not hold. Excel was
+/// seen to write `ctrlProp` for a form control and `package` for an embedded
+/// Office document; `oleObject` and `control` (for `ActiveX` controls) are from ECMA-376,
+/// unverified.
+fn unread_sheet_part(kind: &str) -> Option<&'static str> {
+    match kind {
+        "drawing" => Some("drawings (charts, pictures, shapes)"),
+        "table" => Some("tables"),
+        "pivotTable" => Some("pivot tables"),
+        "oleObject" | "package" | "control" | "ctrlProp" => Some("embedded objects and form controls"),
+        _ => None,
+    }
+}
+
 /// A `<sheet>` entry of `workbook.xml` before its part is read.
 struct SheetEntry {
     name: String,
@@ -88,6 +154,7 @@ struct WorkbookPart {
     names: Vec<NameEntry>,
     date1904: bool,
     calculation: Calculation,
+    protected: bool,
 }
 
 fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result<Workbook, Error> {
@@ -142,7 +209,18 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         None => HashMap::new(),
     };
 
-    let mut warnings = Vec::new();
+    let mut notes = Notes::default();
+    if wb.protected {
+        notes.unread("workbook protection");
+    }
+    for rel in &rels {
+        match rel.kind.as_str() {
+            // Formulas keep `[1]Sheet!A1`; which file `[1]` names is here.
+            "externalLink" => notes.unread("external workbook links"),
+            "vbaProject" => notes.unread("VBA macros"),
+            _ => {}
+        }
+    }
     let mut sheets = Vec::with_capacity(wb.sheets.len());
     for entry in &wb.sheets {
         let rel = by_id.get(entry.rel_id.as_str()).copied().filter(|r| !r.external);
@@ -173,10 +251,12 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
             (Some(text), Some(rel)) if kind != SheetKind::Chartsheet => {
                 let sheet_rels = pkg.relationships(&rel.target)?;
                 let context = SheetContext { shared: &shared, rels: &sheet_rels, styles: &styles };
-                parse_sheet(&text, &rel.target, &context, &mut sheet, &mut budget, &mut warnings)?;
+                parse_sheet(&text, &rel.target, &context, &mut sheet, &mut budget, &mut notes)?;
                 read_comments(pkg, &sheet_rels, &people, &mut sheet)?;
+                sheet_rels.iter().filter_map(|r| unread_sheet_part(&r.kind)).for_each(|what| notes.unread(what));
             }
-            (None, _) => warnings.push(Warning {
+            (Some(_), Some(_)) => notes.unread("chart sheets"),
+            (None, _) => notes.warnings.push(Warning {
                 code: "sheet_part_missing",
                 message: format!("sheet {:?} has no readable part; it is treated as empty", entry.name),
             }),
@@ -191,7 +271,7 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
             let Some(sheet) = id.parse::<usize>().ok().and_then(|i| sheets.get(i)) else {
                 // Promoting it to workbook scope could collide with a real
                 // workbook-level name of the same spelling.
-                warnings.push(Warning {
+                notes.warnings.push(Warning {
                     code: "defined_name_scope_invalid",
                     message: format!(
                         "defined name {:?} names sheet index {id:?}, which does not exist; it is left out",
@@ -214,7 +294,7 @@ fn read_package<R: Read + Seek>(pkg: &mut Package<R>, limits: &Limits) -> Result
         defined_names,
         styles,
         theme,
-        warnings,
+        warnings: notes.finish(),
     })
 }
 
@@ -229,6 +309,7 @@ fn parse_workbook(text: &str, part: &str, budget: &mut Budget) -> Result<Workboo
         names: Vec::new(),
         date1904: false,
         calculation: Calculation { mode: CalcMode::Auto, full_calc_on_load: false },
+        protected: false,
     };
     // The officeDocument of a Word or PowerPoint file is not a workbook.
     let root = loop {
@@ -279,6 +360,10 @@ fn parse_workbook(text: &str, part: &str, budget: &mut Budget) -> Result<Workboo
                 // Nothing else in workbook.xml matters yet; skip whole subtrees
                 // so their children (extLst, fileVersion…) cost nothing.
                 "sheets" | "definedNames" => {}
+                "workbookProtection" => {
+                    wb.protected = true;
+                    p.skip_element()?;
+                }
                 _ => p.skip_element()?,
             },
             Event::Eof => return Ok(wb),
@@ -370,7 +455,7 @@ fn parse_sheet(
     context: &SheetContext<'_>,
     sheet: &mut Sheet,
     budget: &mut Budget,
-    warnings: &mut Vec<Warning>,
+    notes: &mut Notes,
 ) -> Result<(), Error> {
     let mut p = Parser::new(text, part);
     let mut row: Option<Row> = None;
@@ -470,7 +555,12 @@ fn parse_sheet(
                     budget.take_n(1 + rules.len() + rules.first().map_or(0, |r| r.ranges.len()))?;
                     sheet.conditional_formats.extend(rules);
                 }
-                _ => p.skip_element()?,
+                other => {
+                    if let Some(what) = unread_element(other) {
+                        notes.unread(what);
+                    }
+                    p.skip_element()?;
+                }
             },
             Event::End(name) if name == "sheetData" => finish(row.take(), &mut sheet.rows),
             Event::Eof => break,
@@ -483,7 +573,7 @@ fn parse_sheet(
     sheet.layout.cols = disjoint_lines(std::mem::take(&mut sheet.layout.cols));
     expand_shared_formulas(&mut sheet.rows, budget)?;
     if bad_values > 0 {
-        warnings.push(Warning {
+        notes.warnings.push(Warning {
             code: "unreadable_value",
             message: format!("sheet {:?}: {bad_values} cell value(s) could not be read as their type", sheet.name),
         });

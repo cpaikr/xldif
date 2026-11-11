@@ -167,3 +167,63 @@ fn malformed_parts_fail_with_stable_codes() {
     let no_workbook = zip_parts(&[("hello.txt".into(), b"hi".to_vec())]);
     assert_eq!(read_bytes(no_workbook).unwrap_err().code, ErrorCode::InvalidXml);
 }
+
+/// A workbook holding one of everything the model has no place for.
+fn book_with_unread_content() -> Vec<u8> {
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+    RawBook::new()
+        .workbook_before(r#"<workbookProtection lockStructure="1"/>"#)
+        .workbook_rel("externalLink", "externalLinks/externalLink1.xml")
+        .workbook_rel("vbaProject", "vbaProject.bin")
+        .sheet_part(
+            "Data",
+            &format!(
+                r#"<worksheet xmlns="{main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><sheetProtection sheet="1"/><protectedRanges><protectedRange sqref="A1" name="r"/></protectedRanges><autoFilter ref="A1:A1"/><extLst><ext uri="x"/></extLst></worksheet>"#
+            ),
+        )
+        .sheet("Plain", r#"<row r="1"><c r="A1"><v>2</v></c></row>"#)
+        .chartsheet("Chart")
+        .part(
+            "xl/worksheets/_rels/sheet1.xml.rels",
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel}/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rId2" Type="{rel}/table" Target="../tables/table1.xml"/><Relationship Id="rId3" Type="{rel}/table" Target="../tables/table2.xml"/><Relationship Id="rId4" Type="{rel}/pivotTable" Target="../pivotTables/pivotTable1.xml"/><Relationship Id="rId5" Type="{rel}/oleObject" Target="../embeddings/oleObject1.bin"/><Relationship Id="rId6" Type="{rel}/ctrlProp" Target="../ctrlProps/ctrlProp1.xml"/><Relationship Id="rId7" Type="{rel}/package" Target="../embeddings/doc1.docx"/><Relationship Id="rId8" Type="{rel}/control" Target="../activeX/activeX1.xml"/></Relationships>"#
+            )
+            .as_bytes(),
+        )
+        .build()
+}
+
+#[test]
+fn content_the_model_does_not_hold_is_named_in_one_warning() {
+    let book = read_bytes(book_with_unread_content()).unwrap();
+    let unread: Vec<&str> =
+        book.warnings.iter().filter(|w| w.code == "not_compared").map(|w| w.message.as_str()).collect();
+    assert_eq!(unread.len(), 1, "{:?}", book.warnings);
+    for what in [
+        "workbook protection (1)",
+        "external workbook links (1)",
+        "VBA macros (1)",
+        "sheet protection (1)",
+        "extension lists (newer conditional formats and validations, sparklines, slicers) (1)",
+        "drawings (charts, pictures, shapes) (1)",
+        "tables (2)",
+        "pivot tables (1)",
+        "embedded objects and form controls (4)",
+        "chart sheets (1)",
+    ] {
+        assert!(unread[0].contains(what), "{what}: {}", unread[0]);
+    }
+    // A filter is not named: its range and hidden rows are compared.
+    assert!(!unread[0].contains("filter"), "{}", unread[0]);
+    // The cells beside that content are still read.
+    assert_eq!(cell(&book, "Data", 1, 1).value, Value::Number(1.0));
+}
+
+#[test]
+fn a_workbook_the_model_holds_entirely_has_no_such_warning() {
+    for bytes in [xldif_fixtures::basic().unwrap().save_to_buffer().unwrap(), xldif_fixtures::edge_cases()] {
+        let book = read_bytes(bytes).unwrap();
+        assert!(book.warnings.iter().all(|w| w.code != "not_compared"), "{:?}", book.warnings);
+    }
+}

@@ -1,13 +1,16 @@
 //! `xldif`: the process boundary. Parses arguments, runs one command, and
 //! writes exactly one stdout document: a JSON envelope, or plain text for
-//! help, `--version`, and `--format text` views. stderr stays empty.
+//! help, `--version`, and `--format text` views. stderr stays empty, even
+//! when a command panics.
 
 mod cli;
 mod commands;
 mod envelope;
 
 use std::io::Write as _;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::ExitCode;
+use std::sync::Mutex;
 
 use clap::Parser as _;
 use clap::error::ErrorKind;
@@ -25,6 +28,29 @@ fn write_stdout(text: &str) {
 
 fn command_name(argv: &[String]) -> String {
     argv.iter().skip(1).find(|a| !a.starts_with('-')).cloned().unwrap_or_default()
+}
+
+/// Runs a command with a panic turned into an `internal_error` failure, so
+/// a bug still ends in one JSON document, exit status 1, and an empty
+/// stderr.
+fn guarded(run: impl FnOnce() -> Result<commands::Output, Failure>) -> Result<commands::Output, Failure> {
+    static PANIC: Mutex<Option<String>> = Mutex::new(None);
+    // The hook replaces the default one, which writes to stderr, while the
+    // command runs; it keeps the message and source location for the
+    // envelope instead.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        if let Ok(mut slot) = PANIC.lock() {
+            *slot = Some(info.to_string());
+        }
+    }));
+    // Nothing the command touched is used again after a panic.
+    let outcome = catch_unwind(AssertUnwindSafe(run));
+    std::panic::set_hook(default_hook);
+    outcome.unwrap_or_else(|_| {
+        let detail = PANIC.lock().ok().and_then(|mut slot| slot.take()).unwrap_or_default();
+        Err(Failure::internal(&detail.split_whitespace().collect::<Vec<_>>().join(" ")))
+    })
 }
 
 fn main() -> ExitCode {
@@ -62,7 +88,7 @@ fn main() -> ExitCode {
         }
     };
     let name = cli.command.name();
-    match commands::run(cli.command) {
+    match guarded(|| commands::run(cli.command)) {
         Ok(commands::Output::Text(text)) => {
             write_stdout(&text);
             ExitCode::SUCCESS
@@ -75,5 +101,15 @@ fn main() -> ExitCode {
             write_stdout(&Envelope::failure(name, &failure).render(cli.pretty));
             ExitCode::from(failure.exit_code())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_panic_becomes_an_internal_error() {
+        let failure = super::guarded(|| panic!("boom")).err().expect("a failure");
+        assert_eq!((failure.code, failure.exit_code()), ("internal_error", 1));
+        assert!(failure.message.contains("boom") && failure.message.contains("main.rs"), "{}", failure.message);
     }
 }
