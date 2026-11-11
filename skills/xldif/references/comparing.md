@@ -27,7 +27,10 @@ D15), a `kind`, a `status`, `base` and `other` locations, and often `labels`
 and `properties`. A value change's locations carry the stored `value` and,
 when the number format changes how it reads, `display` (`1,234.50`, `(500)`);
 date-formatted numbers also carry `date` (ISO 8601). Quote `display` or
-`date` to a person and `value` for arithmetic.
+`date` to a person and `value` for arithmetic. When the workbooks use
+different date systems (a `date_system_mismatch` warning), the same date has
+two serial numbers: date cells are then compared by `date`, and their
+`delta` is in days.
 
 | kind | meaning |
 |---|---|
@@ -38,6 +41,7 @@ date-formatted numbers also carry `date` (ISO 8601). Quote `display` or
 | `merge`, `comment`, `validation`, `conditionalFormat`, `hyperlink` | objects, carried through the alignment before comparing |
 | `sheet` | visibility; added, removed, renamed, and moved sheets are sheet statuses |
 | `name`, `theme` | workbook-level, under `objects` |
+| `externalLink` | workbook-level, under `objects`: a file another workbook is linked to on one side only (`onlyBase`, `onlyOther`), or a link that names another file on each side (`changed`, with both targets) |
 
 `summary.formulasAdjusted` counts formulas whose text differs only because
 Excel adjusted them for inserted or deleted rows; they are not listed and
@@ -54,6 +58,15 @@ are not changes.
   When such a change has the same formula on both sides and no `expected`,
   a blank row or column was removed and the formula now reads the cell
   that moved into that address.
+- A formula names another workbook by number (`[1]Prices!A1`), and the
+  number is only a position in that workbook's list of links: xldif
+  compares the files, so a renumbered link is not a change. A link
+  pointed at another file is one `externalLink` change that names both
+  files (`externalLink:1:1`); the formulas through it are not listed, and
+  every one of them reads the new file. Say so when reporting it.
+  `xldif inspect BOOK` lists each workbook's links in order. A file name
+  in a formula's `expected` (`[FY2024.xlsx]Sheet1!A1`) means the other
+  workbook no longer links to that file at all.
 - Moved rows are not changes in content; mention them only when order
   matters.
 - Format-only changes are rarely material; summarize them unless asked.
@@ -75,5 +88,6 @@ are not changes.
   formulas; say that figures come from the last save.
 - A `not_compared` warning names content xldif does not read in that
   workbook (charts, tables, pivot tables, protection, newer conditional
-  formats and validations, external link targets, macros).
+  formats and validations, links to something other than a workbook,
+  macros).
   "No changes" does not cover it; say what was left out.

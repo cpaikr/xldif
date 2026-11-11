@@ -144,6 +144,74 @@ fn inspect_text_lists_sheets() {
     assert!(run.stdout.contains("1\tBS\tWorksheet\tVisible\tA1:B4\tcells 8\tformulas 1\n"), "{}", run.stdout);
 }
 
+/// A workbook with one formula through an external link, and the files it
+/// links to in the order formulas number them.
+fn linked_book(links: &[&str], formula: &str) -> Vec<u8> {
+    let rows = format!(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Opening balance</t></is></c><c r="B1"><f>{formula}</f><v>10</v></c></row>"#
+    );
+    let mut book = xldif_fixtures::raw::RawBook::new().sheet("Summary", &rows);
+    for target in links {
+        book = book.external_link(target);
+    }
+    book.build()
+}
+
+#[test]
+fn external_links_are_listed_and_compared_by_the_file_they_name() {
+    let work = Work::new();
+    let base = work.file("base.xlsx", &linked_book(&["FY2024.xlsx"], "[1]Sheet1!A1"));
+    let renumbered = work.file("renumbered.xlsx", &linked_book(&["Budget.xlsx", "FY2024.xlsx"], "[2]Sheet1!A1"));
+    let repointed = work.file("repointed.xlsx", &linked_book(&["FY2025.xlsx"], "[1]Sheet1!A1"));
+
+    let env = ok(&xldif(["inspect", s(&renumbered)]), "inspect");
+    assert_eq!(env["result"]["externalLinks"], serde_json::json!(["Budget.xlsx", "FY2024.xlsx"]));
+    assert_eq!(env["warnings"], serde_json::json!([]));
+    let text = xldif(["inspect", s(&renumbered), "--format", "text"]);
+    assert!(text.stdout.contains("link\t[1]\tBudget.xlsx\nlink\t[2]\tFY2024.xlsx\n"), "{}", text.stdout);
+    let env = ok(&xldif(["inspect", s(&work.basic())]), "inspect");
+    assert_eq!(env["result"]["externalLinks"], serde_json::json!([]));
+
+    // Another number for the same file is not a change; the new link is.
+    let env = ok(&xldif(["compare", s(&base), s(&renumbered)]), "compare");
+    let r = &env["result"];
+    assert_eq!((r["summary"]["formula"].as_u64(), r["summary"]["objects"].as_u64()), (Some(0), Some(1)));
+    let link = &r["objects"][0];
+    assert_eq!(link["id"], "externalLink:-:1");
+    assert_eq!((link["kind"].clone(), link["status"].clone()), ("externalLink".into(), "onlyOther".into()));
+    assert_eq!(link["other"]["text"], "Budget.xlsx");
+
+    // The same number for another file is one change, the link's; the
+    // formula through it, whose text did not change, is not listed.
+    let env = ok(&xldif(["compare", s(&base), s(&repointed)]), "compare");
+    let r = &env["result"];
+    assert_eq!(r["objects"][0]["id"], "externalLink:1:1");
+    assert_eq!(r["objects"][0]["status"], "changed");
+    assert_eq!(
+        r["objects"][0]["properties"][0],
+        serde_json::json!({"name": "target", "base": "FY2024.xlsx", "other": "FY2025.xlsx"})
+    );
+    assert_eq!(r["summary"]["formula"], 0);
+    let text = xldif(["compare", s(&base), s(&repointed), "--format", "text"]);
+    assert!(
+        text.stdout.contains("externalLink:1:1\texternalLink\tchanged\t-→-\ttarget: FY2024.xlsx → FY2025.xlsx\n"),
+        "{}",
+        text.stdout
+    );
+
+    // The kind filters like any other.
+    let env = ok(&xldif(["compare", s(&base), s(&repointed), "--kind", "external-link"]), "compare");
+    assert_eq!(env["result"]["objects"].as_array().unwrap().len(), 1);
+    let env = ok(&xldif(["compare", s(&base), s(&repointed), "--kind", "formula"]), "compare");
+    assert_eq!(env["result"]["objects"].as_array().unwrap().len(), 0);
+
+    // The report lists the link among the workbook's changes.
+    let report = work.0.join("links.html");
+    ok(&xldif(["compare", s(&base), s(&repointed), "--format", "html", "-o", s(&report)]), "compare");
+    let html = std::fs::read_to_string(&report).unwrap();
+    assert!(html.contains("externalLink:1:1") && html.contains("FY2025.xlsx"), "the report names the link");
+}
+
 #[test]
 fn cells_lists_values_and_formulas() {
     let work = Work::new();

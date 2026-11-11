@@ -18,8 +18,8 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     member lookup, content types, and relationships;
   - [xml.rs](crates/xldif/src/xml.rs): a pull parser with local names,
     resolved references, and a depth cap;
-  - [reader.rs](crates/xldif/src/reader.rs): workbook, shared strings, and
-    sheet parts into the model;
+  - [reader.rs](crates/xldif/src/reader.rs): workbook, shared strings,
+    sheet parts, and the files external links name, into the model;
   - [model.rs](crates/xldif/src/model.rs): the immutable workbook model;
   - [cellref.rs](crates/xldif/src/cellref.rs): A1 references and ranges;
   - [views.rs](crates/xldif/src/views.rs): `inspect` and `cells` results;
@@ -28,6 +28,9 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   - [formula.rs](crates/xldif/src/formula.rs): formula tokens, shifting
     (shared formulas), remapping through an alignment, and position-free
     forms for folding;
+  - [links.rs](crates/xldif/src/links.rs): external workbook links paired
+    by the file they name, so a formula's `[1]` is read in the other
+    workbook's numbering before it is compared;
   - [styles.rs](crates/xldif/src/styles.rs): cell formats from `styles.xml`,
     resolved into comparable properties with symbolic colors;
   - [numfmt.rs](crates/xldif/src/numfmt.rs): number format codes rendered
@@ -70,9 +73,10 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   (manual calculation, recalculate-on-open, formulas without a result).
 - **Say what is not read.** Content the model has no place for (charts and
   other drawings, chart sheets, tables, pivot tables, embedded objects,
-  sheet and workbook protection, worksheet extension lists, external link
-  targets, VBA) is counted while reading and named in one `not_compared`
-  warning per workbook, so an empty comparison never silently covers it
+  sheet and workbook protection, worksheet extension lists, external links
+  that name no workbook file, VBA) is counted while reading and named in
+  one `not_compared` warning per workbook, so an empty comparison never
+  silently covers it
   ([reader.rs](crates/xldif/src/reader.rs)). The HTML report shows every
   warning under its header. Autofilter criteria are the
   exception: they are not read and not named, because the filter's range
@@ -111,7 +115,7 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
   formulas adjusted by inserted rows and by other sheets' rows, renamed
   sheets, rewrites with `expected`, formulas replaced by values, unchanged
   text that reads a different cell after rows moved, malformed formulas,
-  and folding.
+  folding, and external links renumbered or pointed at another file.
 - [`crates/xldif/tests/objects.rs`](crates/xldif/tests/objects.rs) covers
   formats, layout, and every object kind on `rust_xlsxwriter` output,
   including an inserted row that every object must follow.

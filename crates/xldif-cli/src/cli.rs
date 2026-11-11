@@ -53,6 +53,7 @@ pub enum Kind {
     Sheet,
     Name,
     Theme,
+    ExternalLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -81,7 +82,9 @@ pub enum CompareFormat {
 pub enum Command {
     /// Workbook structure without cell contents: sheets, kinds, visibility,
     /// used ranges, cell and formula counts, defined names, calculation
-    /// settings, and the date system.
+    /// settings, the date system, and the files external links name
+    /// (`externalLinks`, in the order formulas number them: `[1]` is the
+    /// first).
     Inspect {
         /// The workbook (.xlsx or .xlsm).
         book: PathBuf,
@@ -94,7 +97,8 @@ pub enum Command {
     /// rows and columns; formulas are compared after Excel's adjustment for
     /// inserted and deleted rows; formats, row and column layout, merges,
     /// comments, validation, conditional formats, hyperlinks, sheet
-    /// visibility, defined names, and the theme are compared too.
+    /// visibility, defined names, the theme, and the files external links
+    /// name are compared too.
     #[command(after_help = "Examples:
   xldif compare v1.xlsx v2.xlsx
   xldif compare v1.xlsx v2.xlsx --sheet BS --kind value --format text
@@ -105,13 +109,16 @@ Reading the result:
   summary counts every change; `listed` and `omitted` say what the filters and
   --limit left out, by sheet and kind. Each change has a stable id, a kind
   (value, formula, format, row, column, merge, comment, validation,
-  conditional-format, hyperlink, sheet, name, theme), a status (changed, onlyBase, onlyOther, moved), base
+  conditional-format, hyperlink, sheet, name, theme, external-link), a status (changed, onlyBase, onlyOther, moved), base
   and other locations, a numeric delta, and inferred row/column labels. A
   formula change shows both formulas and `expected`: the base formula as
   Excel would have adjusted it for inserted and deleted rows and columns.
   The same change filled down a column folds into one change with a range;
   formulas that differ only by that adjustment are counted in
-  summary.formulasAdjusted and not listed.
+  summary.formulasAdjusted and not listed. A reference to another workbook
+  ([1]Prices!A1) is compared by the file its number names, not by the number;
+  an externalLink change (id externalLink:<base number>:<other number>) names
+  a file linked on one side only, or the two files one number names.
   alignment.rows/cols are runs [base start, other start, length].")]
     Compare {
         /// The earlier workbook (left side).

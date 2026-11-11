@@ -35,7 +35,9 @@ Status:
   demo pair (`cargo run -p xldif-fixtures --example write_demo -- DIR`).
 - M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
   with evals on the synthetic demo pair) and a release workflow that builds
-  Windows, Linux, and macOS archives when a `v*` tag is pushed.
+  the Windows x64 archive when a `v*` tag is pushed. Windows is the only
+  release target: the tool is used beside Excel. CI still checks Linux, and
+  other platforms build from source.
 - The project review (2026-11-11) kept Rust and the own reader and put
   correctness of the comparison ahead of new features. Its first fixes
   are in; the rest, in order, is in [TODO.md](TODO.md).
@@ -65,68 +67,92 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
                                                                    align, diff, render
 ```
 
-`crates/xldif` modules:
+`crates/xldif` modules, as built. [ARCHITECTURE.md](ARCHITECTURE.md) lists
+every file and the invariants; this list keeps the choices made inside
+them, including what the first plan named and the code does not do.
 
-- **`package`:** zip access with bounds (archive size, member count,
-  decompressed size, XML depth, cell count), and relationship and
-  content-type resolution.
+- **`package`, `xml`:** zip access with bounds (archive size, member count,
+  each member's and the total decompressed size), relationship and
+  content-type resolution, and a pull parser with a depth cap. The reader
+  bounds the number of records (cells, rows, strings, sheets, names,
+  styles).
 - **`reader`:**
   - Workbook level: `workbook.xml` (sheet order, visibility, defined names,
     `calcPr`, and the `workbookPr date1904` flag), shared strings (rich text
-    flattened, runs kept for display), `styles.xml` (including
-    `indexedColors`), `theme1.xml`, `metadata.xml` (dynamic arrays), and
-    `persons.xml`.
-  - Each sheet's XML: cells, types, cached values, formulas, merges, row and
-    column records, data validation, conditional formatting, and hyperlinks.
-  - Comments: legacy notes and threaded comments.
-- **`model`:** an immutable `Workbook` → `Sheet` → sparse cell grid.
-  - Each written cell holds a typed `Value` (number, string, bool, error,
-    empty), a `Formula`, and a `StyleId`.
-  - `Formula` is one of: none; plain; shared (expanded to each cell); or an
-    array anchor, which stores the anchor cell, its range, and whether it is
-    a dynamic or legacy (CSE) array. Cells inside an array range are values
-    marked "spilled from" their anchor and are not given their own formula.
+    flattened to its text, phonetic runs dropped), `styles.xml` (through
+    `styles`), the theme's colour scheme (kept as a fingerprint only),
+    `persons.xml` for the authors of threaded comments, and the file each
+    external link names (`externalReferences`, in the order formulas
+    number them).
+  - Each sheet's XML: cells, types, cached values, and formulas, and through
+    `sheet_objects` merges, row and column records, data validation,
+    conditional formatting, hyperlinks, legacy notes, and threaded comments.
+  - Content with no place in the model is counted for the `not_compared`
+    warning.
+  - Not built: `indexedColors` (an indexed colour compares by its index,
+    whatever palette the workbook defines) and `metadata.xml` (a dynamic
+    array is not told from a legacy array formula).
+- **`model`:** an immutable `Workbook` → `Sheet` → rows of written cells.
+  - Each written cell holds a typed `Value` (number, text, bool, error,
+    empty), an optional `Formula`, and a style index.
+  - A `Formula` has a kind (normal, shared, array, data table), its text,
+    and for an anchor the range it covers. A shared formula's text is
+    expanded for each of its cells. An array formula sits on its anchor
+    only; the other cells of its range are plain values with no mark of
+    where they came from.
   - Row and column records keep their own style, height or width, and hidden
     flag.
-- **`format`:** resolves a cell's style into comparable properties.
+- **`styles`:** resolves a cell's style index into comparable properties.
   - A written `<c>` always uses its own `s`, which defaults to 0.
-  - Inheritance applies only to cells that aren't written: the row style when
-    the row has `customFormat="1"`, else the column style, else 0.
-  - Cell formats are resolved through `cellStyleXfs` (the named-style parent)
-    according to the `applyX` flags. The named style's name is a property of
-    its own.
+  - Cells that aren't written get no format of their own: a row's style
+    (kept when the row has `customFormat="1"`) and a column's style are
+    compared as row and column records.
+  - A `cellXfs` entry is taken as the whole format, which is how Excel
+    writes it. The named-style parent (`cellStyleXfs`) contributes only its
+    name, and the `applyX` flags are not consulted (unverified against
+    files that rely on inheriting from the named style).
   - Colours are kept symbolic: a theme index with tint, an indexed colour,
-    an RGB value, or auto. Resolved RGB is for display only.
-  - The theme-colour index order is lt1, dk1, lt2, dk2, then accents. That is
-    not the order of `clrScheme` in theme1.xml.
-  - A `dxf` (conditional-formatting style) is a set of optional overrides,
-    not a full format. A solid `dxf` fill keeps its colour in `bgColor`.
+    an RGB value, or auto. Nothing resolves them to RGB.
+  - A `dxf` (conditional-formatting style) is kept as a canonical
+    description of its XML, so rules compare by what they apply, not by
+    index.
 - **`formula`:**
   - A tokenizer for A1 references: sheet-qualified, absolute and relative,
-    ranges, whole rows and columns, structured and external references, and
-    `_xlfn.` names. Tokens it doesn't know pass through verbatim.
-  - It produces a reference-free shape: functions, operators, and constants,
-    with references abstracted away.
-  - It can rewrite references through a row and column map.
-- **`align`:** sheet pairing, row and column alignment, and move detection
-  (see Alignment). This includes a port of dsdai's `difflib.rs` matcher and
-  its non-crossing key pairing (same owner, so no licence issue).
-- **`diff`:** cell, row, column, and object changes over an alignment, plus
-  context labels, change folding, and the summary.
+    ranges, whole rows and columns, 3-D spans, and external workbooks'
+    sheets. Structured table references and anything it doesn't know pass
+    through verbatim.
+  - It shifts a shared formula to each of its cells, rewrites references
+    through a row and column map, and produces a position-free form
+    (relative parts as offsets) for folding and for alignment tokens.
+- **`align`:** row and column sequence alignment and move detection (see
+  Alignment).
+- **`links`:** external workbook links paired by the file they name, and
+  a base formula's link numbers rewritten to the other workbook's.
+- **`diff`, `diff_objects`:** sheet pairing, column-then-row alignment of
+  each pair, value and formula changes, formats, layout, and objects over
+  the alignment, plus context labels, change folding, and the summary.
 - **`numfmt`:** an Excel number-format renderer for display strings,
   covering sections, conditions, dates and times, fractions, scientific
-  notation, and literal text. Every code renders; built-in codes that
-  depend on the locale show dates in ISO form and numbers as General.
+  notation, and literal text. Every code renders. Built-in ids whose code
+  depends on the locale show dates in ISO form. The currency and accounting
+  ids (5–8, 41–44) show as Excel does under Korean regional settings (`₩`,
+  a leading minus), observed in Excel on 2026-11-11 for a workbook that
+  names the ids without a code; Excel writes the code itself when it saves,
+  so only files from other writers depend on this. What Excel shows under
+  other regional settings (ECMA-376 lists `$` and parentheses for the US)
+  is not observed and not reproduced.
   Column width (`####`), `*` fill, edge padding, colors, and the locale's
   date separator are not reproduced. Display strings are a convenience
   only: comparisons use typed values. Rules that could only be learned from
   Excel (the sign under conditional sections, negative zero, continued-
   fraction denominators, the case of `am/pm`) were observed through
   `scripts/display_parity.py` and are pinned by unit tests.
-- **`render`:** text, JSON (serde structs), and HTML.
+- **`views`, `html`:** the `inspect` and `cells` results, and the HTML
+  report. Results are serde structs; the CLI serializes them as JSON or
+  prints its own text listing.
 
-The CLI owns argument parsing, the envelope, exit codes, and refusing to
-overwrite files. Release checks and `upgrade` follow dsdai later, in M5.
+The CLI owns argument parsing, the envelope, the text listings, exit codes,
+and refusing to overwrite files. There is no `version` or `upgrade` command.
 
 ## Process contract
 
@@ -148,7 +174,8 @@ Commands:
 
 - `xldif inspect BOOK` gives an agent its first look without cell contents:
   sheets (order, visibility, used range, cell, formula, and comment counts),
-  defined names, calculation settings, date system, and reader warnings.
+  defined names, calculation settings, date system, the files external
+  links name, and reader warnings.
 - `xldif compare BASE OTHER [--format json|text|html] [-o FILE] [--sheet NAME]
   [--kind KIND,...] [--limit N (default 500)] [--all] [--tolerance X]
   [--align content|position] [--force]`
@@ -165,7 +192,8 @@ rows are `row` changes). `xldif compare --help` describes the output.
 
 There is one `kind` vocabulary, shared by `--kind` and the output: `value`,
 `formula`, `format`, `row`, `column`, `sheet`, `name`, `comment`, `merge`,
-`validation`, `conditionalFormat`, `hyperlink`, `theme`.
+`validation`, `conditionalFormat`, `hyperlink`, `theme`, `externalLink`
+(`--kind external-link`).
 
 ```jsonc
 {
@@ -292,8 +320,10 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - Compare by type, then by value. Numbers report a `delta`; `--tolerance`
     suppresses tiny float noise.
   - Numbers formatted as dates also carry an ISO date, taken from each
-    side's own date system. A date1904 mismatch gives a warning, and the
-    ISO dates are compared instead of the raw serials.
+    side's own date system. A date1904 mismatch gives a warning, and cells
+    formatted as dates on both sides compare by their ISO dates instead of
+    the raw serials, with `delta` in days. Alignment still reads the
+    serials.
   - A change of type is a change of its own.
 - **Formulas:**
   - Rewrite the base formula's references through the row and column maps
@@ -326,6 +356,18 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - `#REF!` (and `Sheet!#REF!`) from a deleted reference is an adjustment.
     3-D references (`Jan:Dec!B5`) and external ones (`[1]Prices!A1`) shift
     in shared formulas but never follow this workbook's alignment.
+  - An external reference is compared by the file its number names, not by
+    the number, which is only a position in each workbook's list of links.
+    Links pair by target (without case); the base formula is read in the
+    other workbook's numbering, so `[1]` against `[2]` for one file is no
+    change. A link pointed at another file (`[1]` naming last year's file
+    on one side and this year's on the other) is one `externalLink` change;
+    the formulas through it are not listed one by one. A file the other
+    workbook does not link to at all is written by name in `expected`
+    (`[FY2024.xlsx]Sheet1!A1`), since no number there means it. This covers
+    cell formulas and defined names, including external names
+    (`[1]!Rate`); validation and conditional-format formulas still compare
+    the number as written.
   - Blank rows between two paired rows are matched in order with the other
     side's blank rows in the same gap, so a spacer row next to an inserted
     or deleted line maps where Excel moved it.
@@ -347,6 +389,14 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
 - **Workbook objects:**
   - Sheets: onlyBase, onlyOther, renamed, reordered, visibility.
   - Defined names, compared by name and scope, with `refersTo`.
+  - External links (`externalLink`), compared by the file each names: one
+    linked on a single side is `onlyBase` or `onlyOther`; a number that
+    names another file on each side is one `changed` with both targets.
+    The id carries the numbers formulas use
+    (`externalLink:<base>:<other>`), and `inspect` lists each workbook's
+    links in that order. The target is the link part's `externalBook`
+    relationship as Excel writes it, usually relative to the workbook's
+    folder, so the same file reached by another path is another link.
   - Comments:
     - A threaded comment is compared as its thread: author, resolved through
       `persons.xml`, and each reply's text.
@@ -443,8 +493,8 @@ is proven on real files before the full reader is built.
     the size limits.
 - **M5 Skill and release.**
   - The skill with its evals.
-  - Windows x64 release first, using dsdai's `release.py` pattern, then
-    other targets.
+  - A Windows x64 release (`.github/workflows/release.yml`). Other targets
+    were built at first and dropped: nobody uses them.
   - `version` and `upgrade` only if distribution needs them.
 
 ## Risks to watch

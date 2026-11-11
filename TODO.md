@@ -49,17 +49,23 @@ the first two.
    that [PLAN.md](PLAN.md#decisions) planned; and an Excel-saved workbook
    with invented content among the public fixtures.
 4. **Smaller defects.**
-   - Built-in number formats 5–8 and 41–44 (currency and accounting) display
-     as General, and `scripts/display_parity.py` counts them as locale
-     skips.
-   - With different date systems the raw serials are compared, though
-     [PLAN.md](PLAN.md#cell-and-object-comparison) says ISO dates are.
-   - [PLAN.md](PLAN.md#architecture)'s module list describes reader parts
-     that were not built (`indexedColors`, `metadata.xml`, `applyX`
-     resolution). [ARCHITECTURE.md](ARCHITECTURE.md) is accurate.
-   - External workbook links are compared by index (`[1]`), not by the file
-     they name.
-   - The release workflow builds Linux and macOS archives nobody uses.
+   - Built-in number formats 37–40 are locale-dependent too, and Excel does
+     not write a code for them when it saves. Korean Excel shows a bare 37
+     as `#,##0;-#,##0` (observed 2026-11-11, with 38–40 alike); xldif shows
+     the ECMA-376 code with parentheses, and names that code as the format
+     property. Found while fixing ids 5–8 and 41–44, which now render as
+     Korean Excel does (`locale_builtin` in
+     [numfmt.rs](crates/xldif/src/numfmt.rs)).
+   - Built-in number format 47 is `mm:ss.0` in Excel (observed 2026-11-11:
+     `NumberFormat` and `00:00.0` for a bare id 47); xldif has ECMA-376's
+     `mmss.0` in [styles.rs](crates/xldif/src/styles.rs) and shows `0000.0`.
+   - Between a 1900 and a 1904 workbook, date cells compare by the date
+     they show, but the alignment's tokens are still the serials, so equal
+     dates do not help pair rows there. It belongs with the alignment item.
+   - External links are compared by the file they name in cell formulas
+     and defined names, but validation and conditional-format formulas
+     still compare the number as written, and so do the alignment's
+     formula tokens (a renumbered link makes a formula another token).
 
 ## Features
 
@@ -87,7 +93,12 @@ verified. See [PLAN.md](PLAN.md#risks-to-watch) for details:
 - format facts: row `customFormat`, `dxf` `bgColor`, the threaded-comment
   fallback, and dynamic-array `cm`;
 - built-in number formats 27–36 and 50–58 other than 31 (only 31 has been
-  observed in Excel);
+  observed in Excel), and the currency and accounting formats 5–8 and 41–44
+  under regional settings other than Korean;
 - the `oleObject` and `control` relationship kinds named by the
-  `not_compared` warning (`drawing`, `table`, `chartsheet`, `externalLink`,
-  `ctrlProp`, and `package` were observed in Excel-saved files).
+  `not_compared` warning (`drawing`, `table`, `chartsheet`, `ctrlProp`, and
+  `package` were observed in Excel-saved files);
+- external links: the target Excel writes for a source outside the
+  workbook's folder (only sources in the folder and a subfolder were
+  observed, both relative), and DDE and OLE links, which are read as links
+  that name no workbook file.

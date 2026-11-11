@@ -301,3 +301,107 @@ fn unchanged_range_over_rows_reordered_inside_it_is_not_a_change() {
     let f = formulas(&c);
     assert_eq!(f.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["s0:formula:E1:E1"], "{f:?}");
 }
+
+/// A sheet of labelled formulas (`label`, `formula`, cached result) in a
+/// workbook that links to `links`, in that order, with one defined name.
+fn linked_book(links: &[&str], rows: &[(&str, &str, f64)], rate: &str) -> xldif::model::Workbook {
+    use std::fmt::Write as _;
+    let mut xml = String::new();
+    for (r, (label, formula, result)) in (1..).zip(rows) {
+        let _ = write!(
+            xml,
+            r#"<row r="{r}"><c r="A{r}" t="inlineStr"><is><t>{label}</t></is></c><c r="B{r}"><f>{formula}</f><v>{result}</v></c></row>"#
+        );
+    }
+    let mut book = xldif_fixtures::raw::RawBook::new()
+        .sheet("Summary", &xml)
+        .workbook_after(&format!(r#"<definedNames><definedName name="Rate">{rate}</definedName></definedNames>"#));
+    for target in links {
+        book = book.external_link(target);
+    }
+    read_bytes(book.build()).unwrap()
+}
+
+fn compare_books(base: &xldif::model::Workbook, other: &xldif::model::Workbook) -> Comparison {
+    compare("base.xlsx", base, "other.xlsx", other, CompareOptions::default())
+}
+
+/// `id status base→other` for each workbook-level change.
+fn objects(c: &Comparison) -> Vec<String> {
+    let text = |l: &Option<xldif::diff::Location>| l.as_ref().and_then(|l| l.text.clone()).unwrap_or_default();
+    c.objects.iter().map(|o| format!("{} {:?} {}→{}", o.id, o.status, text(&o.base), text(&o.other))).collect()
+}
+
+#[test]
+fn a_renumbered_external_link_is_not_a_formula_change() {
+    // The other workbook gained a link to Budget.xlsx as its first, so
+    // Prices.xlsx is [2] there and Rates.xlsx is [3].
+    let base = linked_book(
+        &["Prices.xlsx", "Rates.xlsx"],
+        &[
+            ("Widgets", "[1]Sheet1!A1*2", 20.0),
+            ("Rate", "'[2]Year end'!$B$2+[2]!Margin", 3.0),
+            ("Total", "SUM(B1:B2)", 23.0),
+        ],
+        "[2]Sheet1!$A$1",
+    );
+    let other = linked_book(
+        &["Budget.xlsx", "prices.xlsx", "Rates.xlsx"],
+        &[
+            ("Widgets", "[2]Sheet1!A1*2", 20.0),
+            ("Rate", "'[3]Year end'!$B$2+[3]!Margin", 3.0),
+            ("Total", "SUM(B1:B2)", 23.0),
+        ],
+        "[3]Sheet1!$A$1",
+    );
+    for (c, added) in [
+        (compare_books(&base, &other), "externalLink:-:1 OnlyOther →Budget.xlsx"),
+        (compare_books(&other, &base), "externalLink:1:- OnlyBase Budget.xlsx→"),
+    ] {
+        assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+        assert_eq!(c.summary.formulas_adjusted, 0);
+        // The defined name follows its link too; only the new link is listed.
+        assert_eq!(objects(&c), [added]);
+        assert_eq!(c.objects[0].kind, Kind::ExternalLink);
+        assert_eq!(c.summary.objects, 1);
+    }
+}
+
+#[test]
+fn a_link_pointed_at_another_file_is_one_change() {
+    // The same formula text on both sides, reading another file: the link
+    // is the change, not each formula through it.
+    let rows: &[(&str, &str, f64)] = &[("Opening", "[1]Sheet1!A1", 10.0), ("Closing", "[1]Sheet1!A2+1", 12.0)];
+    let base = linked_book(&["FY2024.xlsx"], rows, "Summary!$B$1");
+    let other = linked_book(&["FY2025.xlsx"], rows, "Summary!$B$1");
+    let c = compare_books(&base, &other);
+    assert_eq!(objects(&c), ["externalLink:1:1 Changed FY2024.xlsx→FY2025.xlsx"]);
+    assert_eq!(c.objects[0].properties[0].name, "target");
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+    // A link removed outright leaves its formulas reading a file the other
+    // workbook has no number for: those are listed, with the file named.
+    let removed = linked_book(&[], &[("Opening", "A5", 10.0), ("Closing", "A6+1", 12.0)], "Summary!$B$1");
+    let c = compare_books(&base, &removed);
+    assert_eq!(objects(&c), ["externalLink:1:- OnlyBase FY2024.xlsx→"]);
+    let f = formulas(&c);
+    assert_eq!(f.len(), 2, "{f:?}");
+    assert_eq!(f[0].expected.as_deref(), Some("[FY2024.xlsx]Sheet1!A1"));
+    // The same workbook against itself still has nothing to report.
+    let same = compare_books(&base, &base);
+    assert!(formulas(&same).is_empty() && same.objects.is_empty());
+}
+
+#[test]
+fn a_rewrite_through_a_renumbered_link_shows_the_expected_formula() {
+    let base = linked_book(&["Prices.xlsx", "Rates.xlsx"], &[("Widgets", "[1]Sheet1!A1+1", 11.0)], "[1]Sheet1!$A$1");
+    let other = linked_book(&["Rates.xlsx", "Prices.xlsx"], &[("Widgets", "[2]Sheet1!A1+2", 12.0)], "[1]Sheet1!$A$1");
+    let c = compare_books(&base, &other);
+    let f = formulas(&c);
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].base.as_ref().unwrap().formula.as_deref(), Some("[1]Sheet1!A1+1"));
+    assert_eq!(f[0].expected.as_deref(), Some("[2]Sheet1!A1+1"));
+    // Both files are linked on both sides, so no link is listed; the name
+    // kept its text and so now reads the other file.
+    assert_eq!(objects(&c), ["name:Rate Changed [1]Sheet1!$A$1→[1]Sheet1!$A$1"]);
+    assert_eq!(c.objects[0].expected.as_deref(), Some("[2]Sheet1!$A$1"));
+}

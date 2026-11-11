@@ -242,6 +242,11 @@ pub struct Workbook {
     pub styles: crate::styles::Styles,
     /// A fingerprint of the theme part, whose colors themed cells use.
     pub theme: Option<u64>,
+    /// The workbooks formulas refer to as `[1]`, `[2]`, …, in that order:
+    /// each one's target as the file names it (a file name, path, or
+    /// address, often relative to this workbook's folder). Empty for a
+    /// link that names no workbook file.
+    pub external_links: Vec<String>,
     pub warnings: Vec<Warning>,
 }
 

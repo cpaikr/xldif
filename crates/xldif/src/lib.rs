@@ -11,6 +11,7 @@ mod diff_objects;
 mod error;
 pub mod formula;
 pub mod html;
+mod links;
 pub mod model;
 pub mod numfmt;
 mod package;

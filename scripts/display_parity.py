@@ -16,9 +16,12 @@ saved) so text is not cut to `####`.
 
 Cells are skipped, and counted, when Excel's text is all `#` (too narrow
 even when widened), or when the format is a built-in whose meaning depends
-on the locale and Excel reports another code for it. Text that matches once
-spaces are removed counts as matching: xldif drops `*` fill and trims edge
-padding by design. Exit status 1 when anything else disagrees.
+on the locale and Excel reports another code for it than the one xldif
+renders with. The currency and accounting built-ins (5-8, 41-44) render
+with Korean Excel's codes, so they are checked under Korean regional
+settings and skipped under others. Text that matches once spaces are
+removed counts as matching: xldif drops `*` fill and trims edge padding by
+design. Exit status 1 when anything else disagrees.
 """
 
 from __future__ import annotations
@@ -132,6 +135,11 @@ PROBE = [
     ('[=0]"zero";0.00E+00', [1e-17, 0]),
 ]
 
+# Built-in ids written without a code of their own (currency and
+# accounting): Excel supplies the code from its regional settings.
+BARE_BUILTINS = (5, 6, 7, 8, 41, 42, 43, 44)
+BARE_VALUES = [1234.5, -1234.5, 0, 0.4, -0.4, "text"]
+
 
 def write_probe(path: Path) -> None:
     import openpyxl
@@ -145,6 +153,13 @@ def write_probe(path: Path) -> None:
             ws.cell(r, 1, code)
             c = ws.cell(r, 2, v)
             c.number_format = code
+            r += 1
+    for n in BARE_BUILTINS:
+        # openpyxl writes only the id for a code in its built-in table.
+        for v in BARE_VALUES:
+            ws.cell(r, 1, f"built-in {n}")
+            c = ws.cell(r, 2, v)
+            c.number_format = openpyxl.styles.numbers.BUILTIN_FORMATS[n]
             r += 1
     ws.column_dimensions["A"].width = 60
     ws.column_dimensions["B"].width = 60
@@ -164,6 +179,12 @@ def mask(text: str) -> str:
 def mask_code(code: str) -> str:
     """A format code with its quoted text and escaped characters hidden."""
     return re.sub(r'"[^"]*"', '"…"', re.sub(r"\\.", "\\\\…", code))
+
+
+def plain(code: str) -> str:
+    """A format code without quotes and escapes: `Range.NumberFormat` drops
+    those a stored code has around single characters."""
+    return re.sub(r'["\\]', "", code)
 
 
 def check(excel, exe: str, book: Path, show: bool, shape: bool = False) -> Counter:
@@ -191,9 +212,9 @@ def check(excel, exe: str, book: Path, show: bool, shape: bool = False) -> Count
                 counts["skip narrow"] += 1
                 if show:
                     print(f"  narrow: {row['format']!r} {cell.Value!r} xldif {row['text']!r}")
-            elif (row["format"] in LOCALE_BUILTINS or row["format"].startswith("builtin:")) and str(
-                cell.NumberFormat
-            ) != row["format"]:
+            elif (row["format"] in LOCALE_BUILTINS or row["format"].startswith("builtin:")) and plain(
+                str(cell.NumberFormat)
+            ) != plain(row["code"]):
                 counts["skip locale"] += 1
             elif row["date"] and theirs == row["text"].replace("/", sep):
                 counts["skip locale date separator"] += 1
