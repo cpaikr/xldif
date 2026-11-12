@@ -191,8 +191,8 @@ pub(super) struct Grid<'a> {
     /// the first is the column's label.
     pub(super) headers: HashMap<u32, Vec<String>>,
     reading: Reading<'a>,
-    /// With a date offset: the styles that show a number as a date.
-    date_styles: HashSet<u32>,
+    /// With a date offset: the cells, by row and column, that show a date.
+    dates: HashSet<(u32, u32)>,
 }
 
 impl<'a> Grid<'a> {
@@ -229,23 +229,24 @@ impl<'a> Grid<'a> {
                 (*col, texts)
             })
             .collect();
-        let date_styles = if reading.date_offset.is_some() {
-            let numeric = |c: &&Cell| matches!(c.value, Value::Number(_));
-            let styles: HashSet<u32> =
-                rows.iter().flat_map(|r| r.cells.iter().filter(numeric)).map(|c| c.style).collect();
-            styles.into_iter().filter(|s| formats.get(*s).is_date()).collect()
+        // A cell shows a date when the section of its format that applies
+        // to its value does (`[>=1000]yyyy-mm-dd;0` dates only large
+        // numbers), and the date has a day: a time of day alone is the same
+        // number in both date systems. This is how the comparison decides.
+        let dates = if reading.date_offset.is_some() {
+            let shows_a_date = |c: &Cell| formats.iso_date(c.style, &c.value).is_some_and(|d| d.contains('-'));
+            rows.iter().flat_map(|r| r.cells.iter().filter(|c| shows_a_date(c)).map(|c| (r.index, c.col))).collect()
         } else {
             HashSet::new()
         };
-        Self { sheet, rows, cols, headers, reading, date_styles }
+        Self { sheet, rows, cols, headers, reading, dates }
     }
 
     /// A cell's value as an alignment token. Under different date systems a
-    /// date is read on one scale, as the comparison reads it; a time of day
-    /// alone (below 1) is the same number in both.
-    fn value_token(&self, cell: &Cell) -> Option<Vec<u8>> {
+    /// date is read on one scale, as the comparison reads it.
+    fn value_token(&self, cell: &Cell, row: u32) -> Option<Vec<u8>> {
         match (&cell.value, self.reading.date_offset) {
-            (Value::Number(n), Some(offset)) if *n >= 1.0 && self.date_styles.contains(&cell.style) => {
+            (Value::Number(n), Some(offset)) if self.dates.contains(&(row, cell.col)) => {
                 value_bytes(&Value::Number(n + offset), self.reading.tolerance)
             }
             _ => value_bytes(&cell.value, self.reading.tolerance),
@@ -265,7 +266,7 @@ impl<'a> Grid<'a> {
             let form = formula::relative_form(relinked.as_deref().unwrap_or(&tokens), row, cell.col);
             [b"f".as_slice(), form.as_bytes()].concat()
         });
-        self.value_token(cell).into_iter().chain(formula)
+        self.value_token(cell, row).into_iter().chain(formula)
     }
 
     /// A hash of everything alignment reads, to put two grids in a fixed
@@ -333,7 +334,7 @@ impl<'a> Grid<'a> {
                     .flat_map(|(r, c)| {
                         // A column's formulas change form whenever a column they
                         // refer to moves, so they only stand in for a missing value.
-                        let value = self.value_token(c);
+                        let value = self.value_token(c, *r);
                         let formula = if value.is_none() { self.cell_tokens(c, *r).collect() } else { Vec::new() };
                         value.into_iter().chain(formula)
                     })
