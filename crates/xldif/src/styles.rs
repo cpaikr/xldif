@@ -263,7 +263,7 @@ impl Styles {
 }
 
 /// Built-in number formats (ECMA-376 Part 1, 18.8.30) that are the same in
-/// every locale. Ids 5–8, 23–36, and 41–44 vary by locale and are named
+/// every locale. Ids 5–8 and 23–44 vary by locale and are named
 /// `builtin:<id>`, so format comparison never depends on a locale; display
 /// gives them a code in `numfmt`.
 fn builtin_number_format(id: u32) -> String {
@@ -287,13 +287,10 @@ fn builtin_number_format(id: u32) -> String {
         20 => "h:mm",
         21 => "h:mm:ss",
         22 => "m/d/yy h:mm",
-        37 => "#,##0 ;(#,##0)",
-        38 => "#,##0 ;[Red](#,##0)",
-        39 => "#,##0.00;(#,##0.00)",
-        40 => "#,##0.00;[Red](#,##0.00)",
         45 => "mm:ss",
         46 => "[h]:mm:ss",
-        47 => "mmss.0",
+        // ECMA-376 prints `mmss.0`; Excel has `mm:ss.0` (observed).
+        47 => "mm:ss.0",
         48 => "##0.0E+0",
         49 => "@",
         _ => return format!("builtin:{id}"),

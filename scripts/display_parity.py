@@ -17,8 +17,8 @@ saved) so text is not cut to `####`.
 Cells are skipped, and counted, when Excel's text is all `#` (too narrow
 even when widened), or when the format is a built-in whose meaning depends
 on the locale and Excel reports another code for it than the one xldif
-renders with. The currency and accounting built-ins (5-8, 41-44) render
-with Korean Excel's codes, so they are checked under Korean regional
+renders with. The currency, negative-number, and accounting built-ins
+(5-8, 37-44) render with Korean Excel's codes, so they are checked under Korean regional
 settings and skipped under others. Text that matches once spaces are
 removed counts as matching: xldif drops `*` fill and trims edge padding by
 design. Exit status 1 when anything else disagrees.
@@ -137,7 +137,7 @@ PROBE = [
 
 # Built-in ids written without a code of their own (currency and
 # accounting): Excel supplies the code from its regional settings.
-BARE_BUILTINS = (5, 6, 7, 8, 41, 42, 43, 44)
+BARE_BUILTINS = (5, 6, 7, 8, 37, 38, 39, 40, 41, 42, 43, 44, 47)
 BARE_VALUES = [1234.5, -1234.5, 0, 0.4, -0.4, "text"]
 
 

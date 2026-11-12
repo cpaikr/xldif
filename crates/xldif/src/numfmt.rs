@@ -33,7 +33,9 @@ use crate::styles::Styles;
 /// under Korean Excel: `2024년 01월 01일`; US Excel shows 14 as m/d/yyyy;
 /// the other ids are from ECMA-376, unverified).
 ///
-/// Currency (5–8) and accounting (41–44) ids have no neutral form: the
+/// Currency (5–8), negative-number (37–40), and accounting (41–44) ids
+/// have no neutral form (ECMA-376 lists 37 as `#,##0 ;(#,##0)`; Korean
+/// Excel shows a minus sign and no parentheses): the
 /// file names only the id, and the Excel that opens it supplies the code
 /// from its own regional settings. The codes here are the ones Excel shows
 /// under Korean settings, observed 2026-11-11 by opening a workbook whose
@@ -57,6 +59,10 @@ fn locale_builtin(id: u32) -> &'static str {
         6 => "\"₩\"#,##0;[Red]\\-\"₩\"#,##0",
         7 => "\"₩\"#,##0.00;\\-\"₩\"#,##0.00",
         8 => "\"₩\"#,##0.00;[Red]\\-\"₩\"#,##0.00",
+        37 => "#,##0;\\-#,##0",
+        38 => "#,##0;[Red]\\-#,##0",
+        39 => "#,##0.00;\\-#,##0.00",
+        40 => "#,##0.00;[Red]\\-#,##0.00",
         41 => "_-* #,##0_-;\\-* #,##0_-;_-* \"-\"_-;_-@_-",
         42 => "_-\"₩\"* #,##0_-;\\-\"₩\"* #,##0_-;_-\"₩\"* \"-\"_-;_-@_-",
         43 => "_-* #,##0.00_-;\\-* #,##0.00_-;_-* \"-\"??_-;_-@_-",
@@ -1452,6 +1458,9 @@ mod tests {
             (41, 1234.5, "1,235"),
             (41, -1234.5, "-1,235"),
             (41, 0.0, "-"),
+            (37, -1234.5, "-1,235"),
+            (39, -1234.5, "-1,234.50"),
+            (40, 0.0, "0.00"),
             (42, 1234.5, "₩1,235"),
             (42, -1234.5, "-₩1,235"),
             (42, 0.0, "₩-"),

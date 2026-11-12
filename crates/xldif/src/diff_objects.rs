@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::cellref::{Range, cell_name, col_name};
 use crate::diff::{Change, Kind, Location, Property, Status};
 use crate::formula::{SheetMap, map_range};
+use crate::links::LinkMap;
 use crate::model::{LineProps, RangeRule, Sheet};
 use crate::styles::Styles;
 
@@ -351,7 +352,11 @@ fn ranges_name(ranges: &[Range]) -> String {
 /// A rule with its (mapped, sorted) ranges, as matched.
 type Placed<'a> = (Vec<Range>, &'a RangeRule);
 /// How rules are keyed in one matching pass.
-type RuleKey<'k> = &'k dyn Fn(&Placed<'_>, Option<&SheetMap>) -> String;
+type RuleKey<'k> = &'k dyn Fn(&Placed<'_>, Option<Carry<'_>>) -> String;
+
+/// What carries a base rule's formulas to the other workbook: the sheet
+/// pair's alignment and the workbooks' external links.
+type Carry<'a> = (&'a SheetMap, &'a LinkMap);
 
 /// Rules over ranges (validation, conditional formatting, hyperlinks),
 /// matched in three passes: the same (mapped) ranges and rule is no change;
@@ -360,12 +365,16 @@ type RuleKey<'k> = &'k dyn Fn(&Placed<'_>, Option<&SheetMap>) -> String;
 /// one-sided.
 /// A rule as compared: its description and its formulas, normalized (and,
 /// for the base side, carried through the alignment).
-fn rule_text(rule: &RangeRule, map: Option<&SheetMap>) -> String {
+fn rule_text(rule: &RangeRule, carry: Option<Carry<'_>>) -> String {
     let mut text = rule.rule.clone();
     for f in &rule.formulas {
         let tokens = crate::formula::tokenize(f);
-        let tokens = match map {
-            Some(m) => crate::formula::remap(&tokens, m, |_| None),
+        let tokens = match carry {
+            // The other workbook's link numbers first, then its rows and columns.
+            Some((map, links)) => {
+                let relinked = links.relink(&tokens);
+                crate::formula::remap(relinked.as_deref().unwrap_or(&tokens), map, |_| None)
+            }
             None => tokens,
         };
         text.push_str("; formula=");
@@ -374,7 +383,7 @@ fn rule_text(rule: &RangeRule, map: Option<&SheetMap>) -> String {
     text
 }
 
-fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], fwd: &SheetMap) -> Vec<Change> {
+fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], (fwd, links): Carry<'_>) -> Vec<Change> {
     let sorted = |ranges: &[Range]| {
         let mut m = ranges.to_vec();
         m.sort_unstable();
@@ -397,9 +406,9 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
         }
         map
     };
-    let both = |r: &Placed<'_>, map: Option<&SheetMap>| format!("{}|{}", ranges_name(&r.0), rule_text(r.1, map));
-    let by_ranges = |r: &Placed<'_>, _: Option<&SheetMap>| ranges_name(&r.0);
-    let by_rule = |r: &Placed<'_>, map: Option<&SheetMap>| rule_text(r.1, map);
+    let both = |r: &Placed<'_>, carry: Option<Carry<'_>>| format!("{}|{}", ranges_name(&r.0), rule_text(r.1, carry));
+    let by_ranges = |r: &Placed<'_>, _: Option<Carry<'_>>| ranges_name(&r.0);
+    let by_rule = |r: &Placed<'_>, carry: Option<Carry<'_>>| rule_text(r.1, carry);
     let loc = |ranges: &[Range], rule: &RangeRule| Location {
         range: Some(ranges_name(ranges)),
         text: Some(rule_text(rule, None)),
@@ -412,7 +421,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
             if left_done[i] {
                 continue;
             }
-            let Some(queue) = available.get_mut(&key(l, Some(fwd))) else { continue };
+            let Some(queue) = available.get_mut(&key(l, Some((fwd, links)))) else { continue };
             let Some(j) = std::iter::from_fn(|| queue.pop_front()).find(|&j| !right_done[j]) else { continue };
             left_done[i] = true;
             right_done[j] = true;
@@ -457,32 +466,39 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], f
     out
 }
 
-fn hyperlink_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> {
+fn hyperlink_changes(id: &str, b: Side, o: Side, carry: Carry<'_>) -> Vec<Change> {
     let to_rules = |links: &[crate::model::Hyperlink]| -> Vec<RangeRule> {
         links
             .iter()
             .map(|h| RangeRule { ranges: vec![h.range].into(), rule: h.target.clone(), formulas: Vec::new() })
             .collect()
     };
-    rule_changes(id, Kind::Hyperlink, &to_rules(&b.sheet.hyperlinks), &to_rules(&o.sheet.hyperlinks), fwd)
+    rule_changes(id, Kind::Hyperlink, &to_rules(&b.sheet.hyperlinks), &to_rules(&o.sheet.hyperlinks), carry)
 }
 
 /// Every non-cell change of one sheet pair.
-pub fn sheet_object_changes(id: &str, b: Side, o: Side, fwd: &SheetMap, inv: &SheetMap) -> Vec<Change> {
+pub fn sheet_object_changes(
+    id: &str,
+    b: Side,
+    o: Side,
+    fwd: &SheetMap,
+    inv: &SheetMap,
+    links: &LinkMap,
+) -> Vec<Change> {
     let mut out = format_changes(id, b, o, fwd, inv);
     out.extend(layout_changes(id, Kind::Row, b, o, &fwd.rows, &inv.rows));
     out.extend(layout_changes(id, Kind::Column, b, o, &fwd.cols, &inv.cols));
     out.extend(merge_changes(id, b, o, fwd));
     out.extend(comment_changes(id, b, o, fwd));
-    out.extend(rule_changes(id, Kind::Validation, &b.sheet.validations, &o.sheet.validations, fwd));
+    out.extend(rule_changes(id, Kind::Validation, &b.sheet.validations, &o.sheet.validations, (fwd, links)));
     out.extend(rule_changes(
         id,
         Kind::ConditionalFormat,
         &b.sheet.conditional_formats,
         &o.sheet.conditional_formats,
-        fwd,
+        (fwd, links),
     ));
-    out.extend(hyperlink_changes(id, b, o, fwd));
+    out.extend(hyperlink_changes(id, b, o, (fwd, links)));
     if b.sheet.visibility != o.sheet.visibility {
         let mut c = change(format!("{id}:sheet:visibility"), Kind::Sheet, Status::Changed, None, None);
         c.properties = vec![prop(
