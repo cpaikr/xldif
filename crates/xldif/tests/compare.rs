@@ -311,6 +311,85 @@ fn many_changes_and_repeated_labels_stay_fast() {
     assert_eq!(c.summary.value, n as usize);
 }
 
+#[test]
+fn rows_under_one_label_pair_by_their_values() {
+    // A ledger whose every row is labelled KRW. Each row's second figure was
+    // edited and one row was inserted in the middle. Pairing rows by label
+    // in file order would shift every row after the insertion.
+    let rows = |edit: u32, extra: bool| -> Vec<Vec<String>> {
+        let mut out = vec![vec!["Currency".to_owned(), "Opening".to_owned(), "Closing".to_owned()]];
+        for i in 0..30 {
+            if extra && i == 10 {
+                out.push(vec!["KRW".to_owned(), "777777".to_owned(), "888888".to_owned()]);
+            }
+            out.push(vec!["KRW".to_owned(), (1000 + 7 * i).to_string(), (5000 + 13 * i + edit).to_string()]);
+        }
+        out
+    };
+    let grid = |rows: &[Vec<String>]| -> Vec<u8> {
+        let rows: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        grid_book(&[("Ledger", &rows)])
+    };
+    let (b, o) = (read_bytes(grid(&rows(0, false))).unwrap(), read_bytes(grid(&rows(1, true))).unwrap());
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 30));
+    assert!(brief(sheet(&c, "Ledger")).contains(&"row OnlyOther -→12".to_owned()));
+}
+
+#[test]
+fn a_tolerance_reaches_the_alignment() {
+    // Unlabelled figures, each off by float noise, with a row inserted.
+    // Without the tolerance in the alignment no row matches another.
+    let rows = |noise: f64, extra: bool| -> String {
+        let mut out = String::new();
+        let mut r = 1;
+        for i in 0..40 {
+            if extra && i == 15 {
+                out.push_str(&format!(
+                    r#"<row r="{r}"><c r="A{r}"><v>4242.5</v></c><c r="B{r}"><v>17.25</v></c></row>"#
+                ));
+                r += 1;
+            }
+            let (x, y) = (f64::from(i) * 100.5 + noise, f64::from(i) * 3.25 + 1000.0 + noise);
+            out.push_str(&format!(r#"<row r="{r}"><c r="A{r}"><v>{x}</v></c><c r="B{r}"><v>{y}</v></c></row>"#));
+            r += 1;
+        }
+        out
+    };
+    let book = |xml: &str| read_bytes(xldif_fixtures::raw::RawBook::new().sheet("S", xml).build()).unwrap();
+    let (b, o) = (book(&rows(0.0, false)), book(&rows(1e-9, true)));
+    let exact = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((exact.summary.rows_only_other, exact.summary.rows_only_base), (41, 40));
+    let c = compare("a", &b, "b", &o, CompareOptions { tolerance: 1e-6, ..CompareOptions::default() });
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 0));
+}
+
+#[test]
+fn a_tolerance_sized_for_amounts_leaves_rates_telling_rows_apart() {
+    // Rows under one label, told apart only by two rates below 1, with a
+    // row inserted. A tolerance of 0.5 must not make every rate one token.
+    let rows = |extra: bool| -> Vec<Vec<String>> {
+        let mut out = vec![vec!["Currency".to_owned(), "Spot".to_owned(), "Forward".to_owned()]];
+        for i in 0..40u32 {
+            if extra && i == 16 {
+                out.push(vec!["KRW".to_owned(), "0.9731".to_owned(), "0.9642".to_owned()]);
+            }
+            out.push(vec!["KRW".to_owned(), format!("0.{:04}", 1000 + 137 * i), format!("0.{:04}", 2000 + 191 * i)]);
+        }
+        out
+    };
+    let book = |rows: &[Vec<String>]| {
+        let rows: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        read_bytes(grid_book(&[("Rates", &rows)])).unwrap()
+    };
+    let (b, o) = (book(&rows(false)), book(&rows(true)));
+    let c = compare("a", &b, "b", &o, CompareOptions { tolerance: 0.5, ..CompareOptions::default() });
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 0));
+    assert!(brief(sheet(&c, "Rates")).contains(&"row OnlyOther -→18".to_owned()));
+}
+
 /// Account rows under period columns headed by dates (serials, formatted).
 fn period_book(periods: &[f64], rows: &[(&str, &[f64])]) -> Vec<u8> {
     use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};

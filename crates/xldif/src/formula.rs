@@ -542,9 +542,12 @@ pub fn shift(tokens: &[Token], rows: i64, cols: i64) -> Vec<Token> {
 ///
 /// Numbers between two paired rows (blank rows, cells no row item covered)
 /// are matched in order with the other side's blank rows in the same gap,
-/// skipping rows that were deleted, inserted, or moved there; when the two
+/// skipping rows that were deleted, inserted, or moved there. When the two
 /// gaps hold different numbers of blank rows, a number keeps its offset from
-/// the pair before it, less the deletions in between.
+/// the pair before it, less the deletions in between: a blank row someone
+/// typed into is still that row. A number carried past the end of the other
+/// side's gap has no row to go to and counts as deleted: the blank row was
+/// removed.
 #[derive(Debug, Clone, Default)]
 pub struct AxisMap {
     /// Ordered `(base, other)` pairs.
@@ -613,26 +616,38 @@ impl AxisMap {
         if self.pairs.is_empty() && self.base_taken.is_empty() && self.other_taken.is_empty() {
             return Some(n);
         }
-        let k = self.pairs.partition_point(|p| p.0 < n);
-        let (b1, o1) = if k == 0 { (0, 0) } else { self.pairs[k - 1] };
+        let (b1, o1, end) = self.gap(n);
         // n's place among the base gap's blank numbers, 0-based.
         let index = n - b1 - 1 - Self::between(&self.base_taken, b1, n);
-        if let Some(&(b2, o2)) = self.pairs.get(k) {
+        let k = self.pairs.partition_point(|p| p.0 < n);
+        let same_blanks = self.pairs.get(k).is_some_and(|&(b2, o2)| {
             let base_blanks = (b2 - b1 - 1) - Self::between(&self.base_taken, b1, b2);
-            let other_blanks = (o2.saturating_sub(o1 + 1)).saturating_sub(Self::between(&self.other_taken, o1, o2));
-            if base_blanks == other_blanks {
-                // The index-th other number after o1 that is not taken.
-                let mut x = o1 + 1 + index;
-                loop {
-                    let next = o1 + 1 + index + Self::between(&self.other_taken, o1, x + 1);
-                    if next == x {
-                        return Some(x);
-                    }
-                    x = next;
-                }
+            base_blanks == (o2.saturating_sub(o1 + 1)).saturating_sub(Self::between(&self.other_taken, o1, o2))
+        });
+        let x = if same_blanks { Self::nth_free(&self.other_taken, o1, index) } else { o1.checked_add(1 + index) };
+        x.filter(|&x| x < end)
+    }
+
+    /// The gap an unpaired base number lies in: the pair before it
+    /// (`(0, 0)` before the first) and where the other side's gap ends, at
+    /// the next pair or past the sheet's edge.
+    fn gap(&self, n: u32) -> (u32, u32, u32) {
+        let k = self.pairs.partition_point(|p| p.0 < n);
+        let (b1, o1) = if k == 0 { (0, 0) } else { self.pairs[k - 1] };
+        (b1, o1, self.pairs.get(k).map_or(self.max.saturating_add(1), |p| p.1))
+    }
+
+    /// The `index`-th number (0-based) after `after` that is not in `taken`.
+    fn nth_free(taken: &[u32], after: u32, index: u32) -> Option<u32> {
+        let first = after.checked_add(1)?.checked_add(index)?;
+        let mut x = first;
+        loop {
+            let next = first.checked_add(Self::between(taken, after, x.saturating_add(1)))?;
+            if next == x {
+                return Some(x);
             }
+            x = next;
         }
-        offset(o1, i64::from(index) + 1, self.max)
     }
 
     /// A range corner: like [`map`](Self::map), but a row that moved
@@ -644,12 +659,42 @@ impl AxisMap {
 
     /// The first surviving number at or after `n`, up to `limit`, mapped.
     fn map_forward(&self, n: u32, limit: u32) -> Option<u32> {
-        (n..=limit).take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
+        let mut k = n;
+        while k <= limit {
+            if let Some(mapped) = self.corner(k) {
+                return Some(mapped);
+            }
+            k = if self.base_taken.binary_search(&k).is_ok() {
+                k.checked_add(1)?
+            } else {
+                // A blank number past the end of the other side's gap, like
+                // every blank after it: the next pair is the next survivor.
+                self.pairs.get(self.pairs.partition_point(|p| p.0 < k))?.0
+            };
+        }
+        None
     }
 
     /// The last surviving number at or before `n`, down to `limit`, mapped.
     fn map_backward(&self, n: u32, limit: u32) -> Option<u32> {
-        (limit..=n).rev().take(self.base_taken.len() + 1).find_map(|k| self.corner(k))
+        let mut k = n;
+        while k >= limit && k > 0 {
+            if let Some(mapped) = self.corner(k) {
+                return Some(mapped);
+            }
+            k = if self.base_taken.binary_search(&k).is_ok() {
+                k - 1
+            } else {
+                // A blank number past the end of the other side's gap: the
+                // last blank that still falls inside it, or the pair before.
+                let (b1, o1, end) = self.gap(k);
+                match (end - o1 - 1).checked_sub(1) {
+                    Some(index) => Self::nth_free(&self.base_taken, b1, index)?,
+                    None => b1,
+                }
+            };
+        }
+        None
     }
 }
 
@@ -761,6 +806,41 @@ mod tests {
 
     /// Every string of up to four of the characters the tokenizer branches
     /// on: none may panic, in the tokenizer or in what reads its tokens.
+    #[test]
+    fn blank_rows_between_pairs_keep_their_place_or_are_deleted() {
+        // Rows 1 and 5 pair with 1 and 4; base rows 2..=4 are blank, and so
+        // are other rows 2..=3: one blank row was removed.
+        let removed = AxisMap::new(vec![(1, 1), (5, 4)], Vec::new(), Vec::new(), Vec::new(), 100);
+        assert_eq!([2, 3, 4, 5, 6].map(|n| removed.map(n)), [Some(2), Some(3), None, Some(4), Some(5)]);
+        // The other way round a blank row was added: every base one survives.
+        let added = AxisMap::new(vec![(1, 1), (4, 5)], Vec::new(), Vec::new(), Vec::new(), 100);
+        assert_eq!([2, 3, 4, 5].map(|n| added.map(n)), [Some(2), Some(3), Some(5), Some(6)]);
+        // With as many blank rows on each side, a blank row steps over a row
+        // inserted beside it.
+        let beside = AxisMap::new(vec![(1, 1), (3, 4)], Vec::new(), Vec::new(), vec![2], 100);
+        assert_eq!(beside.map(2), Some(3));
+        // A row someone typed into is still that row: here the one blank row
+        // between the pairs, and the first after the last pair.
+        let typed = AxisMap::new(vec![(1, 1), (3, 3)], Vec::new(), Vec::new(), vec![2], 100);
+        assert_eq!(typed.map(2), Some(2));
+        let appended = AxisMap::new(vec![(1, 1)], Vec::new(), Vec::new(), vec![2], 100);
+        assert_eq!([2, 3, 100].map(|n| appended.map(n)), [Some(2), Some(3), Some(100)]);
+    }
+
+    #[test]
+    fn a_range_corner_on_a_removed_blank_row_moves_inward() {
+        // Base rows 2..=9 are blank between the pairs (1, 1) and (10, 4):
+        // the other side kept two of them.
+        let map = AxisMap::new(vec![(1, 1), (10, 4)], Vec::new(), Vec::new(), Vec::new(), 100);
+        assert_eq!(map.map_backward(7, 1), Some(3));
+        assert_eq!(map.map_backward(7, 4), None);
+        assert_eq!(map.map_forward(7, 20), Some(4));
+        assert_eq!(map.map_forward(7, 9), None);
+        // With no blank row kept, the corner falls back to the pair before.
+        let none = AxisMap::new(vec![(1, 1), (10, 2)], Vec::new(), Vec::new(), Vec::new(), 100);
+        assert_eq!((none.map_backward(7, 1), none.map_backward(7, 2)), (Some(1), None));
+    }
+
     #[test]
     fn no_formula_text_panics() {
         let alphabet = ['[', ']', '\'', '"', '!', '#', ':', '$', 'A', '1', '(', ' ', 'é'];

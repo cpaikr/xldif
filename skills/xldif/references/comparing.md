@@ -72,9 +72,6 @@ are not changes.
 - A formula whose text did not change but now reads a different cell, or a
   total that no longer covers an inserted row, is listed with `expected`;
   explain it as "Excel would have adjusted this to …, but it still reads …".
-  When such a change has the same formula on both sides and no `expected`,
-  a blank row or column was removed and the formula now reads the cell
-  that moved into that address.
 - A formula names another workbook by number (`[1]Prices!A1`), and the
   number is only a position in that workbook's list of links: xldif
   compares the files, so a renumbered link is not a change. A link
@@ -92,8 +89,9 @@ are not changes.
 
 - Many value changes on one sheet together with `alignment.fellBack: true`
   or an `alignment_fallback` warning: part of the sheet was too large to
-  align by content and was compared by position. Narrow the question or say
-  so.
+  align fully by content, and rows there may be paired with the wrong ones.
+  The warning alone, without a run of implausible value changes, usually
+  means the pairing is fine. Narrow the question or say so.
 - A sheet reported as removed and another added with similar content:
   sheets pair by name, then by content; if the content changed too much,
   they are reported separately. Compare the two sheets' cells directly.
@@ -101,6 +99,9 @@ are not changes.
   labels align by their values; heavily edited rows can then show as a
   deletion plus an insertion. Check with `cells` before concluding a row
   was deleted.
+- Swapping BASE and OTHER mirrors the rows, columns, and values reported.
+  Formula changes do not mirror: a row inserted inside a total is a change,
+  the same row deleted is not.
 - Warnings about stale values mean the stored results may not match the
   formulas; say that figures come from the last save.
 - A `not_compared` warning names content xldif does not read in that
