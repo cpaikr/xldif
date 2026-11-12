@@ -176,5 +176,17 @@ proptest! {
         prop_assert_eq!(&va.cols, &flip(&vb.cols));
         prop_assert_eq!(&va.col_moves, &flip(&vb.col_moves));
         prop_assert_eq!(places(&ab, false), places(&ba, true));
+        // No two changes share an id, and the pairing handed to renderers
+        // is the one the alignment runs summarize.
+        let mut ids: Vec<&str> = sa.changes.iter().map(|c| c.id.as_str()).collect();
+        ids.sort_unstable();
+        prop_assert!(ids.windows(2).all(|w| w[0] != w[1]), "{:?}", ids);
+        // (A run also spans the blank rows between its pairs.)
+        let axes = sa.axes.as_ref().unwrap();
+        let in_a_run = |&(b, o): &(u32, u32)| {
+            va.rows.iter().any(|r| (r[0]..r[0] + r[2]).contains(&b) && i64::from(o) - i64::from(b) == i64::from(r[1]) - i64::from(r[0]))
+        };
+        prop_assert!(axes.rows.pairs.iter().all(in_a_run), "{:?} not in {:?}", axes.rows.pairs, va.rows);
+        prop_assert_eq!(va.row_moves.len(), axes.rows.moves.len());
     }
 }

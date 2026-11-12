@@ -7,20 +7,19 @@ milestones; this file holds what is left. Remove an item when it lands.
 
 - **First release.** The maintainer (`sjunepark`, the only actor the
   release workflow accepts) picks the version, sets it in `Cargo.toml`, and
-  pushes its `v*` tag ([AGENTS.md](AGENTS.md#release)). It waits for the
-  comparison-model item below.
+  pushes its `v*` tag ([AGENTS.md](AGENTS.md#release)).
 
 ## Review follow-ups
 
-From the project review of 2026-11-11, in order. Feature work waits for
-the first.
+From the project review of 2026-11-11, in order.
 
-1. **A typed comparison model.** Renderers receive serialized changes with
-   string coordinates and the HTML re-derives one-sided rows from the
-   workbooks, so it can disagree with the comparison (a row holding only an
-   empty string shows as removed and added on identical workbooks). Give
-   the renderers a typed model, serialize at the edge, and split `diff.rs`.
-   Check whether a moved row and a row-layout change can share a change id.
+1. **Typed change places.** A change still carries its places as text
+   (`A1`, `D10:D40`, `B:D`), built where the change is made and read back
+   by `Location::ranges` and `Location::lines` for the report. Building
+   changes from typed places and writing the text only when serializing
+   would remove the round trip; it touches every place a change is made.
+   The report now draws the comparison's own pairing, change ids are
+   unique, and `diff.rs` is split.
 2. **Excel as format oracle.** Check the reader's resolved formats (font,
    fill, borders, alignment, number format) against Excel's own
    `DisplayFormat`, one cell per distinct style, on the Excel-saved

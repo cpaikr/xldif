@@ -41,8 +41,8 @@ Status:
 - The project review (2026-11-11) kept Rust and the own reader and put
   correctness of the comparison ahead of new features. Its first fixes
   are in; the rest, in order, is in [TODO.md](TODO.md).
-- Next action: the comparison-model item in
-  [TODO.md](TODO.md#review-follow-ups).
+- Next action: the maintainer decides the first release; what is left of
+  the review is in [TODO.md](TODO.md#review-follow-ups).
 
 ## Decisions
 

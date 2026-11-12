@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
-use crate::cellref::{Range, cell_name, col_name};
-use crate::diff::{Change, Kind, Listing, SheetComparison, Status};
+use crate::cellref::{cell_name, col_name};
+use crate::diff::{Axis, Change, Kind, Listing, SheetComparison, Status};
 use crate::model::{Cell, Sheet, Value, Workbook};
 use crate::numfmt::Formats;
 
@@ -58,23 +58,19 @@ fn cell_value(sheet: &Sheet, row: u32, col: u32) -> Option<&crate::model::Cell> 
     cells.binary_search_by_key(&col, |c| c.col).ok().map(|i| &cells[i])
 }
 
-/// Rebuilds an axis's slots in display order: the paired numbers from the
-/// alignment runs, moved items at their place on the other side, and the
-/// one-sided numbers, each between the pairs that surround it.
-fn slots(runs: &[[u32; 3]], moves: &[[u32; 3]], lone_base: &[u32], lone_other: &[u32]) -> Vec<Slot> {
-    let mut pairs: Vec<(u32, u32)> = runs.iter().flat_map(|&[b, o, n]| (0..n).map(move |k| (b + k, o + k))).collect();
-    pairs.sort_unstable();
+/// An axis's slots in display order: the paired numbers, moved items at
+/// their place on the other side, and the one-sided numbers, each between
+/// the pairs that surround it.
+fn slots(axis: &Axis) -> Vec<Slot> {
     // Moves and other-side inserts both sit at their other-side position.
-    let mut other_side: Vec<Slot> = moves
+    let mut other_side: Vec<Slot> = axis
+        .moves
         .iter()
-        .flat_map(|&[b, o, n]| {
-            (0..n).map(move |k| Slot { base: Some(b + k), other: Some(o + k), status: Status::Moved })
-        })
-        .chain(lone_other.iter().map(|&o| Slot { base: None, other: Some(o), status: Status::OnlyOther }))
+        .map(|&(b, o)| Slot { base: Some(b), other: Some(o), status: Status::Moved })
+        .chain(axis.lone_other.iter().map(|&o| Slot { base: None, other: Some(o), status: Status::OnlyOther }))
         .collect();
     other_side.sort_unstable_by_key(|s| s.other);
-    let mut lb = lone_base.to_vec();
-    lb.sort_unstable();
+    let lb = &axis.lone_base;
     let (mut ib, mut io) = (0, 0);
     let mut out = Vec::new();
     let flush = |b_limit: u32, o_limit: u32, out: &mut Vec<Slot>, ib: &mut usize, io: &mut usize| {
@@ -87,7 +83,7 @@ fn slots(runs: &[[u32; 3]], moves: &[[u32; 3]], lone_base: &[u32], lone_other: &
             *io += 1;
         }
     };
-    for &(b, o) in &pairs {
+    for &(b, o) in &axis.pairs {
         flush(b, o, &mut out, &mut ib, &mut io);
         out.push(Slot { base: Some(b), other: Some(o), status: Status::Same });
     }
@@ -95,48 +91,25 @@ fn slots(runs: &[[u32; 3]], moves: &[[u32; 3]], lone_base: &[u32], lone_other: &
     out
 }
 
-/// Every cell a change touches on one side: its cell, or each cell of its
-/// ranges (`A1:B2 D5` too), up to a bound; a larger object marks no cells
-/// and is listed in the details panel instead.
+/// Every cell a change touches on one side, up to a bound; a larger object
+/// marks no cells and is listed in the details panel instead.
 fn touched(loc: Option<&crate::diff::Location>) -> Vec<(u32, u32)> {
     const MAX_MARKED: usize = 10_000;
-    let Some(l) = loc else { return Vec::new() };
-    if let Some(ranges) = &l.range {
-        let parsed: Vec<Range> = ranges.split_whitespace().filter_map(Range::parse).collect();
-        let area: usize = parsed
-            .iter()
-            .map(|r| (r.last_row - r.first_row + 1) as usize * (r.last_col - r.first_col + 1) as usize)
-            .sum();
-        if !parsed.is_empty() {
-            if area > MAX_MARKED {
-                return Vec::new();
-            }
-            return parsed
-                .iter()
-                .flat_map(|r| {
-                    (r.first_row..=r.last_row).flat_map(move |row| (r.first_col..=r.last_col).map(move |c| (row, c)))
-                })
-                .collect();
-        }
+    let ranges = loc.map(crate::diff::Location::ranges).unwrap_or_default();
+    let area: usize =
+        ranges.iter().map(|r| (r.last_row - r.first_row + 1) as usize * (r.last_col - r.first_col + 1) as usize).sum();
+    if area > MAX_MARKED {
+        return Vec::new();
     }
-    l.cell.as_deref().and_then(crate::cellref::parse_cell).into_iter().collect()
+    ranges
+        .iter()
+        .flat_map(|r| (r.first_row..=r.last_row).flat_map(move |row| (r.first_col..=r.last_col).map(move |c| (row, c))))
+        .collect()
 }
 
-/// The row (or column) numbers a row or column change covers on one side:
-/// its number, or each number of a folded range such as `3:5` or `B:D`.
+/// The row (or column) numbers a row or column change covers on one side.
 fn lines(loc: Option<&crate::diff::Location>, kind: Kind) -> Vec<u32> {
-    let Some(l) = loc else { return Vec::new() };
-    let one = |t: &str| if kind == Kind::Row { t.parse().ok() } else { crate::cellref::parse_col(t) };
-    if let Some((a, b)) = l.range.as_deref().and_then(|r| r.split_once(':'))
-        && let (Some(a), Some(b)) = (one(a), one(b))
-    {
-        return (a.min(b)..=a.max(b)).take(20_000).collect();
-    }
-    if kind == Kind::Row {
-        l.row.into_iter().collect()
-    } else {
-        l.column.as_deref().and_then(crate::cellref::parse_col).into_iter().collect()
-    }
+    loc.and_then(|l| l.lines(kind)).map(|(a, b)| (a..=b).take(20_000).collect()).unwrap_or_default()
 }
 
 fn kind_class(k: Kind) -> &'static str {
@@ -152,26 +125,6 @@ fn join_ids(ids: &[usize]) -> String {
     ids.iter().map(usize::to_string).collect::<Vec<_>>().join(" ")
 }
 
-/// Content rows and columns of a sheet: those with a value or formula.
-fn content_lines(sheet: &Sheet) -> (Vec<u32>, Vec<u32>) {
-    let rows: Vec<u32> = sheet.rows.iter().filter(|r| r.cells.iter().any(Cell::has_content)).map(|r| r.index).collect();
-    let mut cols: Vec<u32> = sheet.cells().filter(|(_, c)| c.has_content()).map(|(_, c)| c.col).collect();
-    cols.sort_unstable();
-    cols.dedup();
-    (rows, cols)
-}
-
-/// Numbers in `content` that no pair or move of the alignment covers.
-fn unpaired(content: &[u32], runs: &[[u32; 3]], moves: &[[u32; 3]], base_side: bool) -> Vec<u32> {
-    let covered = |n: u32| {
-        runs.iter().chain(moves).any(|&[b, o, len]| {
-            let start = if base_side { b } else { o };
-            (start..start + len).contains(&n)
-        })
-    };
-    content.iter().copied().filter(|&n| !covered(n)).collect()
-}
-
 /// One sheet pair's two grids and its per-cell change index.
 /// `formats` are the base and other workbooks' number formats: cells show
 /// their text as Excel would.
@@ -183,7 +136,7 @@ fn render_sheet(
     formats: [&Formats; 2],
     index: usize,
 ) {
-    let Some(al) = &s.alignment else {
+    let Some(axes) = &s.axes else {
         let what =
             if s.status == Status::OnlyBase { "only in the base workbook" } else { "only in the other workbook" };
         let _ = write!(
@@ -193,26 +146,10 @@ fn render_sheet(
         return;
     };
     let (Some(base), Some(other)) = (base, other) else { return };
-    // The grids follow the alignment, not the listed changes, so filtering
-    // the changes (--kind) never drops inserted rows or misaligns the sides.
-    let ((b_rows, b_cols), (o_rows, o_cols)) = (content_lines(base), content_lines(other));
-    let rows = slots(
-        &al.rows,
-        &al.row_moves,
-        &unpaired(&b_rows, &al.rows, &al.row_moves, true),
-        &unpaired(&o_rows, &al.rows, &al.row_moves, false),
-    );
-    let cols = slots(
-        &al.cols,
-        &al.col_moves,
-        &unpaired(&b_cols, &al.cols, &al.col_moves, true),
-        &unpaired(&o_cols, &al.cols, &al.col_moves, false),
-    );
-    // Only rows and columns with content on either side are drawn: a stray
-    // far-away cell must not widen every row to the whole grid.
-    let in_list = |list: &[u32], n: Option<u32>| n.is_some_and(|n| list.binary_search(&n).is_ok());
-    let rows: Vec<Slot> = rows.into_iter().filter(|r| in_list(&b_rows, r.base) || in_list(&o_rows, r.other)).collect();
-    let cols: Vec<Slot> = cols.into_iter().filter(|c| in_list(&b_cols, c.base) || in_list(&o_cols, c.other)).collect();
+    // The grids are the comparison's own pairing of rows and columns, so
+    // they cannot disagree with it, and filtering the listed changes
+    // (--kind) never drops inserted rows or misaligns the sides.
+    let (rows, cols) = (slots(&axes.rows), slots(&axes.cols));
 
     // Which change ids touch each cell, row, and column, by side.
     let mut on_cell: [HashMap<(u32, u32), Vec<usize>>; 2] = [HashMap::new(), HashMap::new()];
@@ -702,12 +639,21 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &
 #[cfg(test)]
 mod tests {
     use super::{Slot, slots};
-    use crate::diff::Status;
+    use crate::diff::{Axis, Status};
+
+    fn axis(pairs: &[(u32, u32)], moves: &[(u32, u32)], lone_base: &[u32], lone_other: &[u32]) -> Axis {
+        Axis {
+            pairs: pairs.to_vec(),
+            moves: moves.to_vec(),
+            lone_base: lone_base.to_vec(),
+            lone_other: lone_other.to_vec(),
+        }
+    }
 
     #[test]
     fn moves_and_inserts_in_one_gap_keep_the_other_sides_order() {
         // The demo: pairs 1-1, 3-2, 4-3, 5-6, 6-7, 7-8; base 2 moved to other 5; other 4 inserted.
-        let got = slots(&[[1, 1, 1], [3, 2, 2], [5, 6, 3]], &[[2, 5, 1]], &[], &[4]);
+        let got = slots(&axis(&[(1, 1), (3, 2), (4, 3), (5, 6), (6, 7), (7, 8)], &[(2, 5)], &[], &[4]));
         let others: Vec<Option<u32>> = got.iter().map(|s| s.other).collect();
         assert_eq!(others, [Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7), Some(8)]);
     }
@@ -715,7 +661,7 @@ mod tests {
     #[test]
     fn slots_interleave_one_sided_and_moved_rows() {
         // Base 1,2,3,5 paired with other 1,2,4,5; base 4 deleted, other 3 inserted; base 6 moved to other 0? none.
-        let got = slots(&[[1, 1, 2], [3, 4, 1], [5, 5, 1]], &[], &[4], &[3]);
+        let got = slots(&axis(&[(1, 1), (2, 2), (3, 4), (5, 5)], &[], &[4], &[3]));
         let s = |b: Option<u32>, o: Option<u32>, st| Slot { base: b, other: o, status: st };
         assert_eq!(
             got,
