@@ -100,7 +100,7 @@ fn the_same_change_filled_down_folds_into_one() {
     // D2:D4 changed the same way; D5 kept its formula.
     assert_eq!(f.len(), 1, "{f:?}");
     assert_eq!(f[0].id, "s0:formula:D2:D4:D2:D4");
-    assert_eq!(f[0].base.as_ref().unwrap().range.as_deref(), Some("D2:D4"));
+    assert_eq!(f[0].base.as_ref().unwrap().range().as_deref(), Some("D2:D4"));
     assert_eq!(c.summary.formula, 1);
 }
 
@@ -199,7 +199,7 @@ fn folded_ranges_cover_only_changed_cells() {
     let c = run(&[("S", base)], &[("S", other)]);
     let f = formulas(&c);
     assert_eq!(f.len(), 2, "{f:?}");
-    assert!(f.iter().all(|c| c.base.as_ref().unwrap().range.is_none()));
+    assert!(f.iter().all(|c| c.base.as_ref().unwrap().range().is_none()));
 }
 
 #[test]

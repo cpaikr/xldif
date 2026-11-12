@@ -91,10 +91,11 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   alignment tie breaks by index, so the same inputs always give the same
   changes and ids. Change ids derive from locations, never from list order.
 - **One pairing.** A renderer draws the rows and columns the comparison
-  paired (`SheetComparison.axes`) and reads a change's cells through
-  `Location::ranges` and `Location::lines`; it never works the pairing out
-  again from the workbooks, so the report cannot disagree with the JSON.
-  No two changes of a comparison share an id.
+  paired (`SheetComparison.axes`); it never works the pairing out again
+  from the workbooks, so the report cannot disagree with the JSON. A change
+  holds where it is as a typed `Place`, and `cell`, `range`, `row`, and
+  `column` are written from it only when a change is serialized. No two
+  changes of a comparison share an id.
 - **Swapped files mirror.** Each sheet pair is aligned in a fixed order,
   whichever file is the base, so the rows, columns, and values reported for
   `A B` are those for `B A` with the sides exchanged. Formula changes have

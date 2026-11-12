@@ -103,7 +103,7 @@ fn a_format_change_names_its_properties() {
     let c = run(Variant::default(), Variant { bold_total: true, ..Variant::default() });
     let f = of_kind(&c, Kind::Format);
     assert_eq!(f.len(), 1, "{f:?}");
-    assert_eq!(f[0].other.as_ref().unwrap().cell.as_deref(), Some("B6"));
+    assert_eq!(f[0].other.as_ref().unwrap().cell().as_deref(), Some("B6"));
     assert_eq!(f[0].properties.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["font.bold"]);
     assert_eq!(c.summary.format, 1);
 }

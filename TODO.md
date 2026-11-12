@@ -13,14 +13,7 @@ milestones; this file holds what is left. Remove an item when it lands.
 
 From the project review of 2026-11-11, in order.
 
-1. **Typed change places.** A change still carries its places as text
-   (`A1`, `D10:D40`, `B:D`), built where the change is made and read back
-   by `Location::ranges` and `Location::lines` for the report. Building
-   changes from typed places and writing the text only when serializing
-   would remove the round trip; it touches every place a change is made.
-   The report now draws the comparison's own pairing, change ids are
-   unique, and `diff.rs` is split.
-2. **Excel as format oracle.** Check the reader's resolved formats (font,
+1. **Excel as format oracle.** Check the reader's resolved formats (font,
    fill, borders, alignment, number format) against Excel's own
    `DisplayFormat`, one cell per distinct style, on the Excel-saved
    fixtures and with counts only on the private corpus. Colours compare

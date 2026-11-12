@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::axis::Aligned;
 use super::grid::{Grid, display_label, numeric_text, value_bytes};
-use super::{Change, CompareOptions, Kind, Labels, Location, Status};
+use super::{Change, CompareOptions, Kind, Labels, Location, Place, Status};
 use crate::cellref::{Range, cell_name, col_name};
 use crate::formula::{self, SheetMap};
 use crate::links::LinkMap;
@@ -144,13 +144,13 @@ pub(super) fn sheet_changes(
     let (col_al, row_al) = (&al.cols, &al.rows);
     let mut changes = Vec::new();
     for &c in &col_al.lone_base {
-        changes.push(axis_change(id, Kind::Column, Status::OnlyBase, Some(col_name(c)), None, None));
+        changes.push(axis_change(id, Kind::Column, Status::OnlyBase, Some(c), None, None));
     }
     for &c in &col_al.lone_other {
-        changes.push(axis_change(id, Kind::Column, Status::OnlyOther, None, Some(col_name(c)), None));
+        changes.push(axis_change(id, Kind::Column, Status::OnlyOther, None, Some(c), None));
     }
     for &(cb, co) in &col_al.moves {
-        changes.push(axis_change(id, Kind::Column, Status::Moved, Some(col_name(cb)), Some(col_name(co)), None));
+        changes.push(axis_change(id, Kind::Column, Status::Moved, Some(cb), Some(co), None));
     }
 
     let label = |g: &Grid, r: u32| {
@@ -262,13 +262,12 @@ pub(super) fn sheet_changes(
                 (Value::Text(x), Value::Text(y)) => numeric_text(x).zip(numeric_text(y)).map(|(x, y)| y - x),
                 _ => None,
             };
-            let (bn, on) = (cell_name(rb, cb), cell_name(ro, co));
             changes.push(Change {
-                id: format!("{id}:value:{bn}:{on}"),
+                id: format!("{id}:value:{}:{}", cell_name(rb, cb), cell_name(ro, co)),
                 kind: Kind::Value,
                 status,
-                base: Some(cell_location(bn, vb, cell_b.map_or(0, |c| c.style), &formats.0)),
-                other: Some(cell_location(on, vo, cell_o.map_or(0, |c| c.style), &formats.1)),
+                base: Some(cell_location((rb, cb), vb, cell_b.map_or(0, |c| c.style), &formats.0)),
+                other: Some(cell_location((ro, co), vo, cell_o.map_or(0, |c| c.style), &formats.1)),
                 delta,
                 expected: None,
                 labels: Some(labels_for(rb, cb, ro, co)),
@@ -313,31 +312,24 @@ pub(super) fn fold_formula_edits(
     }
     for run in runs {
         let (first, last) = (&run[0], &run[run.len() - 1]);
+        // The run's first cell, or its cells as a block.
         let span = |r1: u32, c1: u32, r2: u32, c2: u32| {
-            let range =
-                Range { first_row: r1.min(r2), first_col: c1.min(c2), last_row: r1.max(r2), last_col: c1.max(c2) };
-            (run.len() > 1).then(|| range.name())
+            Place::block(Range {
+                first_row: r1.min(r2),
+                first_col: c1.min(c2),
+                last_row: r1.max(r2),
+                last_col: c1.max(c2),
+            })
         };
-        let (bn, on) = (cell_name(first.rb, first.cb), cell_name(first.ro, first.co));
-        let base_range = span(first.rb, first.cb, last.rb, last.cb);
-        let other_range = span(first.ro, first.co, last.ro, last.co);
-        let reference = |range: &Option<String>, cell: &str| range.clone().unwrap_or_else(|| cell.to_owned());
+        let base = span(first.rb, first.cb, last.rb, last.cb);
+        let other = span(first.ro, first.co, last.ro, last.co);
+        let reference = |place: &Place| place.reference().unwrap_or_default();
         out.push(Change {
-            id: format!("{id}:formula:{}:{}", reference(&base_range, &bn), reference(&other_range, &on)),
+            id: format!("{id}:formula:{}:{}", reference(&base), reference(&other)),
             kind: Kind::Formula,
             status: first.status,
-            base: Some(Location {
-                cell: Some(bn),
-                range: base_range,
-                formula: first.base.clone(),
-                ..Location::default()
-            }),
-            other: Some(Location {
-                cell: Some(on),
-                range: other_range,
-                formula: first.other.clone(),
-                ..Location::default()
-            }),
+            base: Some(Location { place: base, formula: first.base.clone(), ..Location::default() }),
+            other: Some(Location { place: other, formula: first.other.clone(), ..Location::default() }),
             delta: None,
             expected: first.expected.clone(),
             labels: Some(labels_for(first.rb, first.cb, first.ro, first.co)),
@@ -347,10 +339,10 @@ pub(super) fn fold_formula_edits(
     out
 }
 
-pub(super) fn cell_location(cell: String, v: &Value, style: u32, formats: &Formats) -> Location {
+pub(super) fn cell_location((row, col): (u32, u32), v: &Value, style: u32, formats: &Formats) -> Location {
     let kind = (!matches!(v, Value::Empty)).then(|| v.type_name());
     Location {
-        cell: Some(cell),
+        place: Place::Cell { row, col },
         kind,
         value: json_value(v),
         display: formats.display(style, v),
@@ -363,14 +355,14 @@ pub(super) fn axis_change(
     id: &str,
     kind: Kind,
     status: Status,
-    base: Option<String>,
-    other: Option<String>,
+    base: Option<u32>,
+    other: Option<u32>,
     label: Option<String>,
 ) -> Change {
-    let reference = |x: &Option<String>| x.clone().unwrap_or_else(|| "-".to_owned());
-    let loc = |c: Option<String>| c.map(|c| Location { column: Some(c), ..Location::default() });
+    let reference = |x: Option<u32>| x.map_or_else(|| "-".to_owned(), col_name);
+    let loc = |c: Option<u32>| c.map(|c| Location { place: Place::column(c), ..Location::default() });
     Change {
-        id: format!("{id}:{}:{}:{}", kind.as_str(), reference(&base), reference(&other)),
+        id: format!("{id}:{}:{}:{}", kind.as_str(), reference(base), reference(other)),
         kind,
         status,
         base: loc(base),
@@ -390,7 +382,7 @@ pub(super) fn row_change(
     label: Option<String>,
 ) -> Change {
     let reference = |x: Option<u32>| x.map_or_else(|| "-".to_owned(), |r| r.to_string());
-    let loc = |r: Option<u32>| r.map(|r| Location { row: Some(r), ..Location::default() });
+    let loc = |r: Option<u32>| r.map(|r| Location { place: Place::row(r), ..Location::default() });
     Change {
         id: format!("{id}:row:{}:{}", reference(base), reference(other)),
         kind: Kind::Row,
@@ -409,12 +401,12 @@ pub(super) fn row_change(
 pub(super) fn order_key(c: &Change) -> (u8, u32, u32, u8) {
     let parse = |l: &Option<Location>| -> (u32, u32) {
         let Some(l) = l else { return (u32::MAX, u32::MAX) };
-        if let Some(cell) = &l.cell {
-            crate::cellref::parse_cell(cell).unwrap_or((u32::MAX, u32::MAX))
-        } else if let Some(r) = l.row {
-            (r, 0)
-        } else {
-            (0, l.column.as_deref().and_then(crate::cellref::parse_col).unwrap_or(0))
+        match &l.place {
+            Place::Cell { row, col } => (*row, *col),
+            Place::Block(range) => (range.first_row, range.first_col),
+            Place::Rows { first, .. } => (*first, 0),
+            Place::Columns { first, .. } => (0, *first),
+            Place::Ranges(_) | Place::Nowhere => (0, 0),
         }
     };
     let (r, col) = if c.other.is_some() { parse(&c.other) } else { parse(&c.base) };
