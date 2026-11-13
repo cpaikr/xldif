@@ -511,7 +511,12 @@ fn the_report_folds_only_long_runs_of_added_rows() {
 #[test]
 fn the_report_draws_a_small_changed_sheet_whole() {
     let rows = |amount: &'static str| -> Vec<Vec<&'static str>> {
-        vec![vec!["Cash", "100"], vec!["Debt", amount], vec!["Equity", "300"], vec!["Total", "600"]]
+        vec![
+            vec!["Cash and cash equivalents held at banks and in hand", "100"],
+            vec!["Debt", amount],
+            vec!["Equity", "300"],
+            vec!["Total", "600"],
+        ]
     };
     let book = |amount| {
         let rows = rows(amount);
@@ -522,8 +527,39 @@ fn the_report_draws_a_small_changed_sheet_whole() {
     let c = compare("a", &b, "b", &o, CompareOptions::default());
     let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[]);
     assert_eq!(drawn_rows(&html), 2 * 4);
+    // Every column has the same width, whatever its text, in both grids.
+    let columns = "<colgroup><col style=\"width:48px\"><col span=\"2\" style=\"width:92px\"></colgroup>";
+    assert_eq!(html.matches(columns).count(), 2);
+    assert_eq!(html.matches("<table class=\"grid\" style=\"width:232px\">").count(), 2);
     // Each sheet waits in a template until it is opened.
     assert_eq!(html.matches("<section class=\"sheet\" data-s=\"0\"><template>").count(), 1);
+}
+
+#[test]
+fn the_report_holds_what_the_details_show_for_each_side() {
+    // The details panel reads the selected cell from the two grids: the
+    // column letter and row number from the headers, the formula from the
+    // cell's title, and the shown text from the cell. The script that does
+    // it has no test here; this pins what each grid gives it.
+    let book = |total: &str| {
+        let last = ["Total", total];
+        let rows: Vec<&[&str]> = vec![&["Cash", "100"], &["Debt", "200"], &last];
+        read_bytes(grid_book(&[("S", &rows)])).unwrap()
+    };
+    let (b, o) = (book("=B1+B2|300"), book("=SUM(B1:B2)|300"));
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.formula, c.summary.value), (1, 0));
+    let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[]);
+    let (_, rest) = html.split_once("<div class=\"pane b\">").unwrap();
+    let (base, other) = rest.split_once("<div class=\"pane o\">").unwrap();
+    for (pane, formula) in [(base, "=B1+B2"), (other, "=SUM(B1:B2)")] {
+        assert!(pane.contains("<th class=\"ch\">A</th><th class=\"ch\">B</th>"), "column letters");
+        let cell = format!(
+            "<th class=\"rn\">3</th><td class=\"\">Total</td><td class=\"kf num\" data-c=\"0\" data-a=\"B3\" title=\"{formula}\">300</td>"
+        );
+        assert!(pane.contains(&cell), "{formula} is not in its own pane");
+    }
+    assert!(!base.contains("=SUM(B1:B2)") && !other.split("</table>").next().unwrap().contains("=B1+B2"));
 }
 
 #[test]
