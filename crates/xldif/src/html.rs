@@ -25,6 +25,9 @@ const FULL_GRID_CELLS: usize = 20_000;
 /// Above this many drawn cells, a sheet has no grid and its changes are
 /// listed instead.
 const MAX_GRID_CELLS: usize = 250_000;
+/// Every column's width in pixels: wide enough for a formatted amount.
+/// Columns as wide as their longest text left few of them on screen.
+const COL_WIDTH: usize = 92;
 /// A run of more than this many rows that are all only in the base, or all
 /// only in the other workbook, is folded to its ends.
 const FOLD_OVER: usize = 20;
@@ -267,29 +270,9 @@ fn render_sheet(
         Status::Moved => " cm",
         _ => "",
     };
-    // One width per column slot, shared by both grids so they stay aligned
-    // when scrolled together: from the longest text on either side.
-    let widths: Vec<u32> = cols
-        .iter()
-        .map(|c| {
-            let longest = rows
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| draw[*i])
-                .flat_map(|(_, r)| {
-                    [(base, 0, r.base, c.base), (other, 1, r.other, c.other)].into_iter().filter_map(
-                        |(sheet, side, row, col)| {
-                            cell_value(sheet, row?, col?)
-                                .map(|cell| formats[side].shown(cell.style, &cell.value).chars().count())
-                        },
-                    )
-                })
-                .max()
-                .unwrap_or(0);
-            (u32::try_from(longest).unwrap_or(u32::MAX).saturating_mul(7).saturating_add(14)).clamp(56, 260)
-        })
-        .collect();
-    let total: u32 = 48 + widths.iter().sum::<u32>();
+    // Both grids have the same widths, so they stay aligned when scrolled
+    // together.
+    let total = 48 + COL_WIDTH * cols.len();
     out.push_str("<div class=\"panes\">");
     for (side, sheet) in [(0usize, base), (1usize, other)] {
         let _ = write!(
@@ -297,8 +280,8 @@ fn render_sheet(
             "<div class=\"pane {}\"><table class=\"grid\" style=\"width:{total}px\"><colgroup><col style=\"width:48px\">",
             if side == 0 { "b" } else { "o" }
         );
-        for w in &widths {
-            let _ = write!(out, "<col style=\"width:{w}px\">");
+        if !cols.is_empty() {
+            let _ = write!(out, "<col span=\"{}\" style=\"width:{COL_WIDTH}px\">", cols.len());
         }
         out.push_str("</colgroup><thead><tr><th class=\"rn\"></th>");
         for c in &cols {
@@ -471,11 +454,17 @@ td[data-c],th[data-c],tr.fold[data-c]{cursor:pointer}
 td.hot,th.hot{outline:2px solid var(--accent)!important;outline-offset:-2px}
 body.only .grid tbody tr:not(.ctx){display:none}
 .warn,.lone{margin:8px 12px;color:#8a5a00}
-#info{display:none;flex:none;max-height:38vh;overflow:auto;padding:6px 14px 10px;background:var(--paper);border-top:2px solid var(--accent)}
+#info{display:none;flex:none;max-height:38vh;overflow:auto;padding:6px 0 10px;background:var(--paper);border-top:2px solid var(--accent)}
 body.info #info{display:block}
-#info h3{margin:2px 0 6px;font-size:13px}
+#info>*{margin-left:14px;margin-right:14px}
+#info h3{margin-top:6px;margin-bottom:4px;font-size:13px}
+#info .pr{display:grid;grid-template-columns:1fr 1fr;margin:0;font-size:12px}
+#info .pr>div{display:flex;gap:8px;min-width:0;padding:2px 14px;border-bottom:1px solid #e5e7eb}
+#info .pr>div+div{border-left:1px solid var(--line)}
+#info .pr small{flex:none;width:130px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#info .pr.diff .b code{color:var(--del-ink)}#info .pr.diff .o code{color:var(--ins-ink)}
 #info .k{display:inline-block;margin-right:6px;padding:0 6px;border-radius:8px;background:var(--bg);font-size:11px}
-table.cl{border-collapse:collapse;width:100%;margin:4px 0;font-size:12px}
+table.cl{border-collapse:collapse;width:calc(100% - 28px);margin-top:4px;margin-bottom:4px;font-size:12px}
 table.cl th,table.cl td{border-bottom:1px solid #e5e7eb;padding:2px 6px;text-align:left;vertical-align:top}
 table.cl th{width:130px;color:var(--muted);font-weight:500}
 table.cl td.d{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
@@ -495,22 +484,45 @@ const SCRIPT: &str = r#"
   function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
   function val(l){ if(!l) return ''; if(l.formula!==undefined) return '='+l.formula; if(l.value!==undefined) return typeof l.value==='string'?l.value:String(l.value); return l.text||''; }
   function where(l){ if(!l) return '–'; return l.range||l.cell||(l.row!==undefined?'row '+l.row:'')||(l.column?'column '+l.column:'')||''; }
-  function describe(c){
-    var h='<h3><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+' · '+esc(where(c.base))+' → '+esc(where(c.other))+'</h3><table class="cl">';
-    if(c.labels){ var lb=[c.labels.row,c.labels.column].filter(Boolean).join(' | '); if(lb) h+='<tr><th>label</th><td colspan="2">'+esc(lb)+'</td></tr>'; }
-    if(c.kind==='value'||c.kind==='formula'){
-      h+='<tr><th>base</th><td><code>'+esc(val(c.base))+'</code></td></tr><tr><th>other</th><td><code>'+esc(val(c.other))+'</code></td></tr>';
-      if(c.delta!==undefined) h+='<tr><th>delta</th><td class="d">'+esc((c.delta>0?'+':'')+c.delta)+'</td></tr>';
-      if(c.expected) h+='<tr><th>expected</th><td><code>='+esc(c.expected)+'</code></td></tr>';
-    }
-    (c.properties||[]).forEach(function(p){ h+='<tr><th>'+esc(p.name)+'</th><td><code>'+esc(p.base)+'</code></td><td><code>'+esc(p.other)+'</code></td></tr>'; });
-    if(!(c.properties||[]).length && c.kind!=='value' && c.kind!=='formula'){ var t=(c.other&&c.other.text)||(c.base&&c.base.text); if(t) h+='<tr><th>content</th><td><code>'+esc(t)+'</code></td></tr>'; }
-    return h+'</table>';
+  // One row of the details: the base workbook's on the left, under its
+  // grid, and the other's on the right.
+  function pair(name,b,o,diff){
+    function half(side,text){ return '<div class="'+side+'"><small title="'+esc(name)+'">'+esc(name)+'</small><code>'+esc(text===''||text==null?'–':text)+'</code></div>'; }
+    return '<div class="pr'+(diff?' diff':'')+'">'+half('b',b)+half('o',o)+'</div>';
   }
-  function show(ids,s){
+  function describe(c){
+    var h='<h3><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+' · '+esc(where(c.base))+' → '+esc(where(c.other))+'</h3>', rest='';
+    if(c.labels){ var lb=[c.labels.row,c.labels.column].filter(Boolean).join(' | '); if(lb) rest+='<tr><th>label</th><td>'+esc(lb)+'</td></tr>'; }
+    if(c.kind==='value'||c.kind==='formula'){
+      h+=pair(c.kind,val(c.base),val(c.other),true);
+      if(c.delta!==undefined) rest+='<tr><th>delta</th><td class="d">'+esc((c.delta>0?'+':'')+c.delta)+'</td></tr>';
+      if(c.expected) rest+='<tr><th>expected</th><td><code>='+esc(c.expected)+'</code></td></tr>';
+    }
+    (c.properties||[]).forEach(function(p){ h+=pair(p.name,p.base,p.other,true); });
+    if(!(c.properties||[]).length && c.kind!=='value' && c.kind!=='formula'){ var t=(c.other&&c.other.text)||(c.base&&c.base.text); if(t) rest+='<tr><th>content</th><td><code>'+esc(t)+'</code></td></tr>'; }
+    return h+(rest?'<table class="cl">'+rest+'</table>':'');
+  }
+  // The selected cell as each grid has it: its address, its formula, and
+  // the text it shows.
+  function cell(stop){
+    if(!stop||stop.row<0||stop.col<1) return '';
+    var view=sheets[current].view, sides={b:null,o:null};
+    (view.rows[stop.row]||[]).forEach(function(tr){
+      var td=tr.children[stop.col];
+      if(!td||td.classList.contains('void')||tr.classList.contains('fold')) return;
+      var head=tr.closest('table').tHead.rows[0].children[stop.col];
+      sides[tr.closest('.pane').classList.contains('b')?'b':'o']={at:head.textContent+tr.firstChild.textContent,formula:td.tip?td.formula:td.title,text:td.textContent};
+    });
+    function get(side,key){ return sides[side]?sides[side][key]:'–'; }
+    if(!sides.b&&!sides.o) return '';
+    var h=pair('cell',get('b','at'),get('o','at'));
+    if((sides.b&&sides.b.formula)||(sides.o&&sides.o.formula)) h+=pair('formula',get('b','formula'),get('o','formula'));
+    return h+pair('shown',get('b','text'),get('o','text'));
+  }
+  function show(ids,s,stop){
     var sheet=data.sheets[s]; if(!sheet) return;
     var more=ids.length-50;
-    info.innerHTML=(ids.slice(0,50).map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>')+(more>0?'<p>… and '+more+' more changes here.</p>':'');
+    info.innerHTML=cell(stop)+(ids.slice(0,50).map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>')+(more>0?'<p>… and '+more+' more changes here.</p>':'');
     if(!body.classList.contains('info')) document.getElementById('infobtn').click();
   }
   function line(c,i){ return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'; }
@@ -597,7 +609,7 @@ const SCRIPT: &str = r#"
     if(r.left<p.left||r.right>p.right) pane.scrollLeft+=r.left-p.left-pane.clientWidth/3;
     hot(stop);
     counter.textContent=(at+1)+' / '+stops.length;
-    show(ids(el),current);
+    show(ids(el),current,stop);
   }
   document.getElementById('next').onclick=function(){select(at+1)};
   document.getElementById('prev').onclick=function(){select(at-1)};
@@ -620,6 +632,14 @@ const SCRIPT: &str = r#"
     }
     var row=e.target.closest('#info tr[data-n]');
     if(row) show([Number(row.getAttribute('data-n'))],current);
+  });
+  // A cell too narrow for its text shows all of it as a tooltip, above
+  // its formula. A title written in the file is the cell's formula; `tip`
+  // marks one set here, and `formula` keeps what the file had.
+  document.addEventListener('mouseover',function(e){
+    var td=e.target;
+    if(td.tagName!=='TD'||td.tip||!td.closest('.grid')||td.scrollWidth<=td.clientWidth) return;
+    td.tip=1; td.formula=td.title; td.title=td.textContent+(td.formula?'\n'+td.formula:'');
   });
   document.addEventListener('keydown',function(e){
     if(e.target.tagName==='INPUT'||e.ctrlKey||e.metaKey||e.altKey) return;

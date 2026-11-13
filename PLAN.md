@@ -460,11 +460,16 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - Two panes side by side, scrolling together, each named after its file.
 - **Grid:**
   - Each pane shows its own row numbers and column letters.
+  - Every column has the same width, so that as many as possible fit in a
+    pane; a cell too narrow for its text shows all of it as a tooltip.
   - Inserted and deleted rows and columns appear as hatched placeholder rows
     and columns opposite them, and moved rows are marked.
   - Cells are coloured by change kind.
-  - Clicking a cell shows old and new value, formula (with `expected`), and
-    changed format properties.
+  - Clicking a cell shows its details in two halves, the base workbook's
+    under the base pane and the other's under the other pane: the cell's
+    address, formula, and shown text on each side, then each change's old
+    and new value or formula (with `delta` and `expected`) and changed
+    format properties.
   - Cell text uses the display string; fonts and fills are drawn lightly.
 - **Size:** the report draws what changed, so that a workbook of large
   sheets still opens and responds in a browser. Drawing every sheet whole

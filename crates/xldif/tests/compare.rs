@@ -511,7 +511,12 @@ fn the_report_folds_only_long_runs_of_added_rows() {
 #[test]
 fn the_report_draws_a_small_changed_sheet_whole() {
     let rows = |amount: &'static str| -> Vec<Vec<&'static str>> {
-        vec![vec!["Cash", "100"], vec!["Debt", amount], vec!["Equity", "300"], vec!["Total", "600"]]
+        vec![
+            vec!["Cash and cash equivalents held at banks and in hand", "100"],
+            vec!["Debt", amount],
+            vec!["Equity", "300"],
+            vec!["Total", "600"],
+        ]
     };
     let book = |amount| {
         let rows = rows(amount);
@@ -522,6 +527,10 @@ fn the_report_draws_a_small_changed_sheet_whole() {
     let c = compare("a", &b, "b", &o, CompareOptions::default());
     let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[]);
     assert_eq!(drawn_rows(&html), 2 * 4);
+    // Every column has the same width, whatever its text, in both grids.
+    let columns = "<colgroup><col style=\"width:48px\"><col span=\"2\" style=\"width:92px\"></colgroup>";
+    assert_eq!(html.matches(columns).count(), 2);
+    assert_eq!(html.matches("<table class=\"grid\" style=\"width:232px\">").count(), 2);
     // Each sheet waits in a template until it is opened.
     assert_eq!(html.matches("<section class=\"sheet\" data-s=\"0\"><template>").count(), 1);
 }
