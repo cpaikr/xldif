@@ -405,7 +405,125 @@ fn the_report_draws_the_rows_the_comparison_paired() {
     assert_eq!((axes.rows.pairs, axes.rows.lone_base, axes.rows.lone_other), (vec![(1, 1), (2, 2)], vec![], vec![]));
     let listing = c.list(&Filter { all: true, ..Filter::default() });
     let html = xldif::html::render_html(&listing, &book(), &book(), &[]);
-    assert!(html.contains("<tr class=\"r\"") && !html.contains("<tr class=\"r r") && !html.contains(" chg"));
+    assert!(html.contains("This sheet has no changes.") && !html.contains("<tr class=\"r"));
+    // With a change on the sheet its grid is drawn, and the row is in neither.
+    let changed = read_bytes(
+        xldif_fixtures::raw::RawBook::new().sheet("S", &xml.replacen("<v>100</v>", "<v>101</v>", 1)).build(),
+    )
+    .unwrap();
+    let c = compare("a", &book(), "b", &changed, CompareOptions::default());
+    assert_eq!(c.summary.value, 1);
+    let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &book(), &changed, &[]);
+    assert_eq!(pane_rows(&html), [vec!["0", "1"], vec!["0", "1"]]);
+    assert!(!html.contains("<tr class=\"r r"));
+}
+
+/// The `data-i` of each drawn row, for the base pane and the other pane.
+fn pane_rows(html: &str) -> [Vec<&str>; 2] {
+    let (_, rest) = html.split_once("<div class=\"pane b\">").expect("base pane");
+    let (base, other) = rest.split_once("<div class=\"pane o\">").expect("other pane");
+    [base, other].map(|pane| {
+        pane.split("<tr class=\"r")
+            .skip(1)
+            .map(|row| row.split("data-i=\"").nth(1).unwrap().split('"').next().unwrap())
+            .collect()
+    })
+}
+
+/// The report's rows for one side of one sheet: a browser has to hold every
+/// one of them.
+fn drawn_rows(html: &str) -> usize {
+    html.matches("<tr class=\"r").count()
+}
+
+#[test]
+fn the_report_draws_only_what_changed_on_large_workbooks() {
+    let line = |r: usize, amount: usize| -> Vec<String> {
+        (0..40).map(|c| if c == 0 { format!("account {r}") } else { (r * 100 + c + amount).to_string() }).collect()
+    };
+    let grid = |rows: &[Vec<String>]| -> Vec<u8> {
+        let rows: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        grid_book(&[("Untouched", &rows[..600]), ("Ledger", &rows)])
+    };
+    let base: Vec<Vec<String>> = (0..1000).map(|r| line(r, 0)).collect();
+    let mut other = base.clone();
+    other[700] = line(700, 5);
+    // 300 rows appended, as a ledger grows.
+    other.extend((1000..1300).map(|r| line(r, 0)));
+    let (b, o) = (read_bytes(grid(&base)).unwrap(), read_bytes(grid(&other)).unwrap());
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.sheets_changed, c.summary.rows_only_other), (1, 300));
+    let listing = c.list(&Filter { all: true, ..Filter::default() });
+    let html = xldif::html::render_html(&listing, &b, &o, &[]);
+    // The unchanged sheet has no grid. The changed one shows the changed
+    // row with two neighbours each way, and the appended run folded to
+    // five rows at each end with one row standing for the rest, after the
+    // two rows of context above it: 5 + 2 + 5 + 1 + 5, on each side.
+    let [base_rows, other_rows] = pane_rows(&html);
+    assert_eq!((base_rows.len(), &base_rows), (18, &other_rows), "the panes draw the same rows");
+    assert!(html.contains("This sheet has no changes."));
+    // The row that stands for the hidden ones carries their change, and its
+    // place on the other side is empty.
+    let fold = html.split("fold\" data-i=\"1005\" data-c=\"").nth(1).expect("the fold carries changes");
+    let (ids, rest) = fold.split_once('"').unwrap();
+    let changes = &listing.sheets.iter().find(|s| !s.changes.is_empty()).unwrap().changes;
+    let hidden: Vec<&Change> = ids.split(' ').map(|i| &changes[i.parse::<usize>().unwrap()]).collect();
+    assert!(hidden.len() == 290 && hidden.iter().all(|c| c.kind == Kind::Row), "one change for each hidden row");
+    assert!(
+        rest.starts_with("><th class=\"rn\">⋮</th><td colspan=\"40\">290 more rows between 1006 and 1295, not drawn<"),
+        "the fold says what it hides"
+    );
+    assert!(html.contains("fold\" data-i=\"1005\"><th class=\"rn\"></th><td class=\"void\" colspan=\"40\">"));
+    assert!(html.contains("only changed rows and their neighbours are shown"));
+    assert!(!html.contains("account 300<") && html.contains("account 700<"));
+    assert!(html.len() < 200_000, "{} bytes", html.len());
+    // Removed rows fold the same way.
+    let c = compare("b", &o, "a", &b, CompareOptions::default());
+    let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &o, &b, &[]);
+    let [base_rows, other_rows] = pane_rows(&html);
+    assert_eq!((base_rows.len(), &base_rows), (18, &other_rows));
+    assert!(html.contains("<td colspan=\"40\">290 more rows between 1006 and 1295, not drawn<"));
+}
+
+#[test]
+fn the_report_folds_only_long_runs_of_added_rows() {
+    let report = |added: usize| {
+        let rows: Vec<Vec<String>> = (0..3 + added).map(|r| vec![format!("item {r}"), (r * 7).to_string()]).collect();
+        let book = |n: usize| {
+            let rows: Vec<Vec<&str>> = rows[..n].iter().map(|r| r.iter().map(String::as_str).collect()).collect();
+            let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+            read_bytes(grid_book(&[("S", &rows)])).unwrap()
+        };
+        let (b, o) = (book(3), book(3 + added));
+        let c = compare("a", &b, "b", &o, CompareOptions::default());
+        assert_eq!(c.summary.rows_only_other, added);
+        xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[])
+    };
+    // A small sheet is drawn whole, and 20 added rows are all drawn.
+    assert_eq!(pane_rows(&report(20))[1].len(), 23);
+    // 21 fold to five at each end and one row for the other eleven.
+    let html = report(21);
+    assert_eq!(pane_rows(&html)[1].len(), 3 + 5 + 1 + 5);
+    assert!(html.contains(">11 more rows between 9 and 19, not drawn<"));
+}
+
+#[test]
+fn the_report_draws_a_small_changed_sheet_whole() {
+    let rows = |amount: &'static str| -> Vec<Vec<&'static str>> {
+        vec![vec!["Cash", "100"], vec!["Debt", amount], vec!["Equity", "300"], vec!["Total", "600"]]
+    };
+    let book = |amount| {
+        let rows = rows(amount);
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        read_bytes(grid_book(&[("S", &rows)])).unwrap()
+    };
+    let (b, o) = (book("200"), book("250"));
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[]);
+    assert_eq!(drawn_rows(&html), 2 * 4);
+    // Each sheet waits in a template until it is opened.
+    assert_eq!(html.matches("<section class=\"sheet\" data-s=\"0\"><template>").count(), 1);
 }
 
 #[test]
