@@ -305,10 +305,7 @@ fn located_value(l: Option<&Location>) -> String {
 }
 
 fn reference(l: Option<&Location>) -> String {
-    l.and_then(|l| {
-        l.range.clone().or_else(|| l.cell.clone()).or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone())
-    })
-    .unwrap_or_else(|| "-".to_owned())
+    l.and_then(|l| l.place.reference()).unwrap_or_else(|| "-".to_owned())
 }
 
 fn change_text(c: &Change) -> String {

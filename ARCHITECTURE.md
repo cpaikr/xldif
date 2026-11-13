@@ -91,10 +91,11 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   alignment tie breaks by index, so the same inputs always give the same
   changes and ids. Change ids derive from locations, never from list order.
 - **One pairing.** A renderer draws the rows and columns the comparison
-  paired (`SheetComparison.axes`) and reads a change's cells through
-  `Location::ranges` and `Location::lines`; it never works the pairing out
-  again from the workbooks, so the report cannot disagree with the JSON.
-  No two changes of a comparison share an id.
+  paired (`SheetComparison.axes`); it never works the pairing out again
+  from the workbooks, so the report cannot disagree with the JSON. A change
+  holds where it is as a typed `Place`, and `cell`, `range`, `row`, and
+  `column` are written from it only when a change is serialized. No two
+  changes of a comparison share an id.
 - **Swapped files mirror.** Each sheet pair is aligned in a fixed order,
   whichever file is the base, so the rows, columns, and values reported for
   `A B` are those for `B A` with the sides exchanged. Formula changes have
@@ -174,9 +175,14 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`scripts/display_parity.py`](scripts/display_parity.py) compares display
   text with Excel's own (`Range.Text`, through COM on Windows) on a
   synthetic probe of format codes, and on given workbooks with counts only.
+- [`scripts/format_parity.py`](scripts/format_parity.py) compares the cell
+  formats the reader resolves (font, fill, borders, alignment, protection)
+  with Excel's own, one cell for each distinct format of a workbook. Theme
+  and indexed colours, which xldif holds symbolically, are not compared.
 - [`scripts/check.py`](scripts/check.py) runs fmt, clippy, tests, a CLI smoke
   run, parity over the public fixtures and, when present, the private corpus,
   and a corpus compare smoke run: every workbook against itself must show no
   changes, and consecutive versions must compare, counting pairs that do not
   mirror when swapped (counts only). Where Excel is installed it also runs
-  the display probe; `--excel` adds the private corpus.
+  the display probe and the format check on the Excel-saved fixtures;
+  `--excel` adds the private corpus to both.

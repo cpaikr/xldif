@@ -108,8 +108,8 @@ fn touched(loc: Option<&crate::diff::Location>) -> Vec<(u32, u32)> {
 }
 
 /// The row (or column) numbers a row or column change covers on one side.
-fn lines(loc: Option<&crate::diff::Location>, kind: Kind) -> Vec<u32> {
-    loc.and_then(|l| l.lines(kind)).map(|(a, b)| (a..=b).take(20_000).collect()).unwrap_or_default()
+fn lines(loc: Option<&crate::diff::Location>) -> Vec<u32> {
+    loc.and_then(crate::diff::Location::lines).map(|(a, b)| (a..=b).take(20_000).collect()).unwrap_or_default()
 }
 
 fn kind_class(k: Kind) -> &'static str {
@@ -159,12 +159,12 @@ fn render_sheet(
         for (side, loc) in [(0, c.base.as_ref()), (1, c.other.as_ref())] {
             match c.kind {
                 Kind::Row => {
-                    for n in lines(loc, Kind::Row) {
+                    for n in lines(loc) {
                         on_row[side].entry(n).or_default().push(i);
                     }
                 }
                 Kind::Column => {
-                    for n in lines(loc, Kind::Column) {
+                    for n in lines(loc) {
                         on_col[side].entry(n).or_default().push(i);
                     }
                 }

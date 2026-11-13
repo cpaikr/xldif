@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Serialize;
 
 use crate::align::{self, Item};
-use crate::cellref::{MAX_COL, MAX_ROW, Range};
+use crate::cellref::{MAX_COL, MAX_ROW, Range, cell_name, col_name};
 use crate::formula::{self, AxisMap, SheetMap};
 use crate::links::LinkMap;
 use crate::model::{Sheet, Warning, Workbook};
@@ -160,18 +160,119 @@ impl Kind {
     }
 }
 
+/// Where a change is on one side's sheet.
+///
+/// Changes are built with a place and name it as text only when written
+/// out: `cell`, `range`, `row`, and `column` in JSON, and the references in
+/// a change's id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Place {
+    /// Nowhere on a sheet: a workbook object such as a defined name.
+    #[default]
+    Nowhere,
+    Cell {
+        row: u32,
+        col: u32,
+    },
+    /// A folded run of more than one cell (a formula filled down, a block
+    /// formatted alike): written as its first cell and its range.
+    Block(Range),
+    /// The ranges an object covers (a merge, a rule): written as `range`,
+    /// several separated by spaces.
+    Ranges(Vec<Range>),
+    /// A row, or a folded run of rows.
+    Rows {
+        first: u32,
+        last: u32,
+    },
+    /// A column, or a folded run of columns (1 = A).
+    Columns {
+        first: u32,
+        last: u32,
+    },
+}
+
+/// A place as JSON writes it.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaceText {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cell: Option<String>,
+    /// For a folded change: the cells it covers, such as `D10:D40`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    range: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    row: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<String>,
+}
+
+impl Place {
+    /// The cells of `range`: one cell, or a block.
+    pub fn block(range: Range) -> Self {
+        if range.first_row == range.last_row && range.first_col == range.last_col {
+            Self::Cell { row: range.first_row, col: range.first_col }
+        } else {
+            Self::Block(range)
+        }
+    }
+
+    pub const fn row(n: u32) -> Self {
+        Self::Rows { first: n, last: n }
+    }
+
+    pub const fn column(n: u32) -> Self {
+        Self::Columns { first: n, last: n }
+    }
+
+    fn text(&self) -> PlaceText {
+        let run = |first: u32, last: u32, one: &dyn Fn(u32) -> String| {
+            (first != last).then(|| format!("{}:{}", one(first), one(last)))
+        };
+        match self {
+            Self::Nowhere => PlaceText::default(),
+            Self::Cell { row, col } => PlaceText { cell: Some(cell_name(*row, *col)), ..PlaceText::default() },
+            Self::Block(r) => PlaceText {
+                cell: Some(cell_name(r.first_row, r.first_col)),
+                range: Some(r.name()),
+                ..PlaceText::default()
+            },
+            Self::Ranges(ranges) => PlaceText {
+                range: Some(ranges.iter().map(Range::name).collect::<Vec<_>>().join(" ")),
+                ..PlaceText::default()
+            },
+            Self::Rows { first, last } => {
+                PlaceText { row: Some(*first), range: run(*first, *last, &|n| n.to_string()), ..PlaceText::default() }
+            }
+            Self::Columns { first, last } => PlaceText {
+                column: Some(col_name(*first)),
+                range: run(*first, *last, &col_name),
+                ..PlaceText::default()
+            },
+        }
+    }
+
+    /// The place as ids and listings name it: a block's or an object's
+    /// range, else the cell, row, or column. `None` for nowhere.
+    pub fn reference(&self) -> Option<String> {
+        let text = self.text();
+        text.range.or(text.cell).or_else(|| text.row.map(|r| r.to_string())).or(text.column)
+    }
+}
+
+impl Serialize for Place {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.text().serialize(serializer)
+    }
+}
+
+/// One side of a change: where it is and what is there.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Location {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cell: Option<String>,
-    /// For a folded change: the cells it covers, such as `D10:D40`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub range: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub row: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub column: Option<String>,
+    /// Written as `cell`, `range`, `row`, and `column`, whichever apply.
+    #[serde(flatten)]
+    pub place: Place,
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub kind: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,35 +295,47 @@ pub struct Location {
 }
 
 impl Location {
-    /// The cells this location names: its ranges (`A1:B2 D5` is two), or its
-    /// one cell. Empty for a row, a column, or a workbook object.
-    pub fn ranges(&self) -> Vec<Range> {
-        let ranges: Vec<Range> =
-            self.range.as_deref().map(|r| r.split_whitespace().filter_map(Range::parse).collect()).unwrap_or_default();
-        if !ranges.is_empty() {
-            return ranges;
-        }
-        self.cell
-            .as_deref()
-            .and_then(crate::cellref::parse_cell)
-            .map(|(row, col)| Range { first_row: row, first_col: col, last_row: row, last_col: col })
-            .into_iter()
-            .collect()
+    /// The cell, as `B5`: a cell's own, or a block's first.
+    pub fn cell(&self) -> Option<String> {
+        self.place.text().cell
     }
 
-    /// The first and last row (for a `row` change) or column (for a
-    /// `column` change) this location names: one line, or a folded run such
-    /// as `3:5` or `B:D`.
-    pub fn lines(&self, kind: Kind) -> Option<(u32, u32)> {
-        let one = |t: &str| if kind == Kind::Row { t.parse().ok() } else { crate::cellref::parse_col(t) };
-        if let Some((a, b)) = self.range.as_deref().and_then(|r| r.split_once(':'))
-            && let (Some(a), Some(b)) = (one(a), one(b))
-        {
-            return Some((a.min(b), a.max(b)));
+    /// The range, as `D10:D40`, `3:5`, or `B:D`: a block's, an object's, or
+    /// a folded run of rows or columns.
+    pub fn range(&self) -> Option<String> {
+        self.place.text().range
+    }
+
+    /// The row, or the first of a run of rows.
+    pub fn row(&self) -> Option<u32> {
+        self.place.text().row
+    }
+
+    /// The column, as `B`, or the first of a run of columns.
+    pub fn column(&self) -> Option<String> {
+        self.place.text().column
+    }
+
+    /// The cells this location names: its cell, its block, or its ranges.
+    /// Empty for rows, columns, and workbook objects.
+    pub fn ranges(&self) -> Vec<Range> {
+        match &self.place {
+            Place::Cell { row, col } => {
+                vec![Range { first_row: *row, first_col: *col, last_row: *row, last_col: *col }]
+            }
+            Place::Block(range) => vec![*range],
+            Place::Ranges(ranges) => ranges.clone(),
+            Place::Nowhere | Place::Rows { .. } | Place::Columns { .. } => Vec::new(),
         }
-        let line =
-            if kind == Kind::Row { self.row } else { self.column.as_deref().and_then(crate::cellref::parse_col) };
-        line.map(|n| (n, n))
+    }
+
+    /// The first and last row or column this location names, for a `row` or
+    /// `column` change.
+    pub const fn lines(&self) -> Option<(u32, u32)> {
+        match self.place {
+            Place::Rows { first, last } | Place::Columns { first, last } => Some((first, last)),
+            _ => None,
+        }
     }
 }
 
@@ -747,5 +860,30 @@ impl Comparison {
             }
         }
         Listing { base: self.base, other: self.other, summary: self.summary, listed, omitted, sheets, objects }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Location, Place};
+    use crate::cellref::Range;
+
+    #[test]
+    fn a_place_is_written_as_the_fields_a_reader_expects() {
+        let range = |text: &str| Range::parse(text).unwrap();
+        let written = |place: Place| serde_json::to_string(&Location { place, ..Location::default() }).unwrap();
+        assert_eq!(written(Place::Nowhere), "{}");
+        assert_eq!(written(Place::Cell { row: 5, col: 2 }), r#"{"cell":"B5"}"#);
+        assert_eq!(written(Place::block(range("D10:D40"))), r#"{"cell":"D10","range":"D10:D40"}"#);
+        assert_eq!(written(Place::block(range("D10"))), r#"{"cell":"D10"}"#);
+        assert_eq!(written(Place::Ranges(vec![range("A1:B2"), range("D5")])), r#"{"range":"A1:B2 D5"}"#);
+        assert_eq!(written(Place::row(3)), r#"{"row":3}"#);
+        assert_eq!(written(Place::Rows { first: 3, last: 5 }), r#"{"range":"3:5","row":3}"#);
+        assert_eq!(written(Place::column(2)), r#"{"column":"B"}"#);
+        assert_eq!(written(Place::Columns { first: 2, last: 4 }), r#"{"range":"B:D","column":"B"}"#);
+        // Ids and listings name a place by its range first.
+        assert_eq!(Place::block(range("D10:D40")).reference().as_deref(), Some("D10:D40"));
+        assert_eq!(Place::Columns { first: 2, last: 4 }.reference().as_deref(), Some("B:D"));
+        assert_eq!(Place::Nowhere.reference(), None);
     }
 }

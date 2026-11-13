@@ -38,7 +38,7 @@ fn brief(s: &SheetComparison) -> Vec<String> {
 fn describe(c: &Change) -> String {
     let r = |l: &Option<xldif::diff::Location>| {
         l.as_ref()
-            .and_then(|l| l.cell.clone().or_else(|| l.row.map(|r| r.to_string())).or_else(|| l.column.clone()))
+            .and_then(|l| l.cell().or_else(|| l.row().map(|r| r.to_string())).or_else(|| l.column()))
             .unwrap_or_else(|| "-".into())
     };
     format!("{} {:?} {}→{}", c.kind.as_str(), c.status, r(&c.base), r(&c.other))

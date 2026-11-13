@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::cellref::{Range, cell_name, col_name};
-use crate::diff::{Change, Kind, Location, Property, Status};
+use crate::diff::{Change, Kind, Location, Place, Property, Status};
 use crate::formula::{SheetMap, map_range};
 use crate::links::LinkMap;
 use crate::model::{LineProps, RangeRule, Sheet};
@@ -25,7 +25,7 @@ fn change(id: String, kind: Kind, status: Status, base: Option<Location>, other:
 }
 
 fn range_location(r: Range) -> Location {
-    Location { range: Some(r.name()), ..Location::default() }
+    Location { place: Place::Ranges(vec![r]), ..Location::default() }
 }
 
 fn prop(name: &str, base: impl Into<String>, other: impl Into<String>) -> Property {
@@ -130,11 +130,7 @@ fn format_changes(id: &str, b: Side, o: Side, fwd: &SheetMap, inv: &SheetMap) ->
         .map(|((co1, co2, cb1, cb2, key), (ro1, ro2, rb1, rb2))| {
             let other = Range { first_row: ro1, first_col: co1, last_row: ro2, last_col: co2 };
             let base = Range { first_row: rb1, first_col: cb1, last_row: rb2, last_col: cb2 };
-            let loc = |r: Range| Location {
-                cell: Some(cell_name(r.first_row, r.first_col)),
-                range: (r.first_row != r.last_row || r.first_col != r.last_col).then(|| r.name()),
-                ..Location::default()
-            };
+            let loc = |r: Range| Location { place: Place::block(r), ..Location::default() };
             let mut c = change(
                 format!("{id}:format:{}:{}", base.name(), other.name()),
                 Kind::Format,
@@ -239,9 +235,10 @@ fn layout_changes(
                 let one = |n: u32| if kind == Kind::Row { n.to_string() } else { col_name(n) };
                 if a == b { one(a) } else { format!("{}:{}", one(a), one(b)) }
             };
-            let loc = |a: u32, b: u32| {
-                let (row, column) = if kind == Kind::Row { (Some(a), None) } else { (None, Some(col_name(a))) };
-                Location { row, column, range: (a != b).then(|| name(a, b)), ..Location::default() }
+            let loc = |first: u32, last: u32| {
+                let place =
+                    if kind == Kind::Row { Place::Rows { first, last } } else { Place::Columns { first, last } };
+                Location { place, ..Location::default() }
             };
             // `:layout` keeps the id apart from the move of the same row or
             // column, which names the same two numbers.
@@ -290,7 +287,7 @@ fn merge_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> {
 }
 
 fn comment_changes(id: &str, b: Side, o: Side, fwd: &SheetMap) -> Vec<Change> {
-    let at = |row: u32, col: u32| Location { cell: Some(cell_name(row, col)), ..Location::default() };
+    let at = |row: u32, col: u32| Location { place: Place::Cell { row, col }, ..Location::default() };
     let other: HashMap<(u32, u32), &crate::model::Comment> =
         o.sheet.comments.iter().map(|c| ((c.row, c.col), c)).collect();
     let mut matched = HashSet::new();
@@ -410,7 +407,7 @@ fn rule_changes(id: &str, kind: Kind, base: &[RangeRule], other: &[RangeRule], (
     let by_ranges = |r: &Placed<'_>, _: Option<Carry<'_>>| ranges_name(&r.0);
     let by_rule = |r: &Placed<'_>, carry: Option<Carry<'_>>| rule_text(r.1, carry);
     let loc = |ranges: &[Range], rule: &RangeRule| Location {
-        range: Some(ranges_name(ranges)),
+        place: Place::Ranges(ranges.to_vec()),
         text: Some(rule_text(rule, None)),
         ..Location::default()
     };

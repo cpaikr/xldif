@@ -117,11 +117,10 @@ fn flip(runs: &[Run]) -> Vec<Run> {
 fn place(c: &Change, mirrored: bool) -> (&'static str, &'static str, String, String) {
     let at = |l: &Option<Location>| {
         l.as_ref().map_or_else(String::new, |l| {
-            l.cell
-                .clone()
-                .or_else(|| l.range.clone())
-                .or_else(|| l.row.map(|r| r.to_string()))
-                .or_else(|| l.column.clone())
+            l.cell()
+                .or_else(|| l.range())
+                .or_else(|| l.row().map(|r| r.to_string()))
+                .or_else(|| l.column())
                 .unwrap_or_default()
         })
     };
