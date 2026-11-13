@@ -230,12 +230,25 @@ def compare_smoke() -> None:
               f"{asymmetric} not mirrored when swapped)")
 
 
+_excel_from_python: bool | None = None
+
+
+def excel_from_python() -> bool:
+    """Whether Python can drive Excel here: Windows, Excel, and pywin32.
+    Starts Excel once to find out."""
+    global _excel_from_python
+    if _excel_from_python is None:
+        probe = "import win32com.client as w; e = w.DispatchEx('Excel.Application'); e.Quit()"
+        ran = sys.platform == "win32" and subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True)
+        _excel_from_python = bool(ran) and ran.returncode == 0
+    return _excel_from_python
+
+
 def display_parity(corpus: bool) -> None:
     """Display text agrees with Excel's own on a synthetic probe of number
     formats, and with --excel on the private corpus (counts only). Needs
     Windows, Excel, and pywin32; skipped with a note when they are absent."""
-    probe = "import win32com.client as w; e = w.DispatchEx('Excel.Application'); e.Quit()"
-    if sys.platform != "win32" or subprocess.run([sys.executable, "-I", "-c", probe], capture_output=True).returncode:
+    if not excel_from_python():
         print("skip display parity: needs Windows, Excel, and pywin32")
         return
     proc = subprocess.run(["cargo", "build", "-q", "--locked", "-p", "xldif", "--example", "shown"], cwd=ROOT)
@@ -266,7 +279,7 @@ def format_parity(corpus: bool) -> None:
     agree with Excel's own on the Excel-saved fixtures, and with --excel on
     the private corpus (counts only, several minutes). Needs Windows, Excel,
     and pywin32; skipped with a note when they are absent."""
-    if not excel_installed():
+    if not excel_from_python():
         print("skip format parity: needs Windows, Excel, and pywin32")
         return
     proc = subprocess.run(["cargo", "build", "-q", "--locked", "-p", "xldif", "--example", "formats"], cwd=ROOT)

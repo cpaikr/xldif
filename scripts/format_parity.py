@@ -7,7 +7,8 @@ Usage:
 FORMATS_EXE is the `formats` example (`cargo build -p xldif --example
 formats`), which prints one written cell for each distinct format of a
 workbook. Excel opens each book read-only in its own hidden process and is
-asked for the same cell's font, fill, borders, alignment, and protection.
+asked for the same cell's font, fill, borders (line and colour), alignment
+(horizontal, vertical, wrap, indent, rotation, shrink), and protection.
 
 Counts are printed by property. With --show, each disagreement is printed
 too: use it only on workbooks with invented content. Exit status 1 when
@@ -16,10 +17,13 @@ anything disagrees.
 What is not checked, and counted as skipped:
 - colours xldif holds symbolically (theme and indexed colours): only an
   explicit RGB colour can be compared with the colour Excel reports;
-- an edge xldif reads as having no border, or a lighter one than Excel
-  reports: two cells share an edge, and Excel reports the heavier of their
-  two borders for both (seen on the private corpus: a thin border beside a
-  neighbour's medium one);
+- an edge where neither the cell nor a written neighbour across it has a
+  border, or whose colours are symbolic. Two cells share an edge and Excel
+  reports one border for it, so a border agrees when it is the cell's own
+  or the written neighbour's (seen on the private corpus: a thin border
+  beside a neighbour's medium one, and a white one under a neighbour's
+  grey). Where the neighbour is not a written cell, a heavier line or
+  another colour than the cell's own is taken to be the neighbour's;
 - cells inside a merge, whose alignment Excel reports for the merged area;
 - fill patterns other than none and solid, and number formats, which
   `display_parity.py` checks through the text they produce.
@@ -68,6 +72,17 @@ BORDER = {
     "slantDashDot": (13, -4138),
 }
 EDGES = {"border.left": 7, "border.top": 8, "border.bottom": 9, "border.right": 10}
+# Excel names four orientations; any other is in degrees.
+STACKED = "stacked"
+ORIENTATION = {-4128: 0, -4171: 90, -4170: -90, -4166: STACKED}
+
+
+def degrees(rotation: int):
+    """A stored `textRotation` as Excel reports it: 0-90 turns the text up,
+    91-180 turns it down by the amount over 90, and 255 stacks the letters."""
+    if rotation == 255:
+        return STACKED
+    return rotation if rotation <= 90 else 90 - rotation
 
 
 def rgb(color: str) -> int | None:
@@ -88,7 +103,7 @@ def heavier(weight, than) -> bool:
     return order.get(weight, -1) > order.get(than, 9)
 
 
-def compare(cell, ours: dict) -> list[tuple[str, str, object, object]]:
+def compare(cell, ours: dict, neighbours: dict) -> list[tuple[str, str, object, object]]:
     """`(property, outcome, ours, excel)` for each property, outcome one of
     agree, differ, skipped."""
     out = []
@@ -113,17 +128,31 @@ def compare(cell, ours: dict) -> list[tuple[str, str, object, object]]:
     pattern = ours["fill.pattern"]
     check("fill.pattern", {"none": NONE, "solid": 1}.get(pattern), interior.Pattern)
     check("fill.fg", rgb(ours["fill.fg"]), int(interior.Color or 0), pattern == "solid")
+    # Two cells share an edge and Excel reports one border for it, so the
+    # border Excel reports may be this cell's or the neighbour's across it.
     for name, edge in EDGES.items():
-        style = ours[name].split(" ")[0]
         border = cell.Borders(edge)
         theirs = (border.LineStyle, border.Weight)
-        expected = BORDER.get(style)
-        # A heavier line than this cell's own is the neighbour's.
-        neighbours = expected is not None and theirs != expected and heavier(theirs[1], expected[1])
-        check(name, expected, theirs, style != "none" and not neighbours)
+        facing = neighbours.get(name)
+        known = [e for e in (ours[name], facing) if e and e.split(" ")[0] in BORDER]
+        lines = [BORDER[e.split(" ")[0]] for e in known]
+        own = BORDER.get(ours[name].split(" ")[0])
+        # With no written neighbour, a heavier line than the cell's own is
+        # taken to be an unwritten neighbour's (a row or column format).
+        unseen = facing is None and own is not None and heavier(theirs[1], own[1])
+        check(name, theirs if theirs in lines else (lines[0] if lines else None), theirs, bool(lines) and not unseen)
+        # The colour is compared where the line is one of the two cells' own.
+        colours = [rgb(e.split(" ", 1)[1]) for e in known if BORDER[e.split(" ")[0]] == theirs and " " in e]
+        colour = int(border.Color or 0)
+        ours[name + ".color"] = " or ".join(known)
+        comparable = bool(colours) and None not in colours and (facing is not None or colour in colours)
+        check(name + ".color", colour if colour in colours else (colours[0] if colours else None), colour, comparable)
     check("alignment.horizontal", HORIZONTAL.get(ours["alignment.horizontal"]), cell.HorizontalAlignment)
     check("alignment.vertical", VERTICAL.get(ours["alignment.vertical"]), cell.VerticalAlignment)
     check("alignment.wrap", flag(ours["alignment.wrap"]), bool(cell.WrapText))
+    check("alignment.indent", int(ours["alignment.indent"]), cell.IndentLevel)
+    check("alignment.rotation", degrees(int(ours["alignment.rotation"])), ORIENTATION.get(cell.Orientation, cell.Orientation))
+    check("alignment.shrink", flag(ours["alignment.shrink"]), bool(cell.ShrinkToFit))
     check("protection.locked", flag(ours["protection.locked"]), bool(cell.Locked))
     check("protection.hidden", flag(ours["protection.hidden"]), bool(cell.FormulaHidden))
     return out
@@ -161,7 +190,7 @@ def main() -> int:
                         counts[("cell", "skipped")] += 1
                         continue
                     cells += 1
-                    for prop, outcome, ours, theirs in compare(cell, sample["format"]):
+                    for prop, outcome, ours, theirs in compare(cell, sample["format"], sample["neighbours"]):
                         counts[(prop, outcome)] += 1
                         if outcome == "differ" and show:
                             print(f"{book.name} {name}!{sample['cell']} {prop}: xldif {ours!r}, Excel {theirs!r}")
