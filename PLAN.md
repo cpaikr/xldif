@@ -136,9 +136,9 @@ them, including what the first plan named and the code does not do.
 - **`numfmt`:** an Excel number-format renderer for display strings,
   covering sections, conditions, dates and times, fractions, scientific
   notation, and literal text. Every code renders. Built-in ids whose code
-  depends on the locale show dates in ISO form. The currency and accounting
-  ids (5–8, 41–44) show as Excel does under Korean regional settings (`₩`,
-  a leading minus), observed in Excel on 2026-11-11 for a workbook that
+  depends on the locale show dates in ISO form. The currency,
+  negative-number, and accounting ids (5–8, 37–44) show as Excel does under
+  Korean regional settings (`₩`, a leading minus, no parentheses), observed in Excel on 2026-11-11 for a workbook that
   names the ids without a code; Excel writes the code itself when it saves,
   so only files from other writers depend on this. What Excel shows under
   other regional settings (ECMA-376 lists `$` and parentheses for the US)
@@ -399,8 +399,8 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     workbook does not link to at all is written by name in `expected`
     (`[FY2024.xlsx]Sheet1!A1`), since no number there means it. This covers
     cell formulas and defined names, including external names
-    (`[1]!Rate`); validation and conditional-format formulas still compare
-    the number as written.
+    (`[1]!Rate`), validation and conditional-format formulas, and the
+    formula tokens rows are aligned on.
   - Blank rows between two paired rows are matched in order with the other
     side's blank rows in the same gap, so a spacer row next to an inserted
     or deleted line maps where Excel moved it. When the two gaps hold

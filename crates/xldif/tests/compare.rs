@@ -428,6 +428,83 @@ fn a_moved_row_that_was_also_resized_has_two_ids() {
     assert_eq!(ids, ["s0:row:2:5", "s0:row:2:5:layout"]);
 }
 
+#[test]
+fn rows_keyed_by_dates_pair_across_date_systems() {
+    // A list with no labels: a date, an amount, a code, and a count per
+    // row, every amount changed, and one row inserted. The same date has
+    // another serial in each workbook; read as serials, each row shares only
+    // two of its four cells with its partner, too few to pair.
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let styles = format!(
+        r#"<styleSheet xmlns="{main}"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy-mm-dd"/></numFmts><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>"#
+    );
+    let row = |r: u32, cells: [f64; 4]| {
+        let [date, amount, code, count] = cells;
+        format!(
+            r#"<row r="{r}"><c r="A{r}" s="1"><v>{date}</v></c><c r="B{r}"><v>{amount}</v></c><c r="C{r}"><v>{code}</v></c><c r="D{r}"><v>{count}</v></c></row>"#
+        )
+    };
+    let book = |date1904: bool, first: f64, bump: f64, extra: bool| {
+        let mut xml = String::new();
+        let mut r = 1;
+        for i in 0..20u32 {
+            if extra && i == 8 {
+                xml.push_str(&row(r, [first + 400.0, 7.0, 9001.0, 1.0]));
+                r += 1;
+            }
+            let i = f64::from(i);
+            xml.push_str(&row(r, [first + i * 3.0, i * 11.0 + bump, 5000.0 + i * 3.0, 50.0 + i]));
+            r += 1;
+        }
+        let book = xldif_fixtures::raw::RawBook::new()
+            .workbook_rel("styles", "styles.xml")
+            .part("xl/styles.xml", styles.as_bytes());
+        let book = if date1904 { book.workbook_before(r#"<workbookPr date1904="1"/>"#) } else { book };
+        read_bytes(book.sheet("List", &xml).build()).unwrap()
+    };
+    // 2024-01-01 is 43830 in the 1904 system and 45292 in the 1900 system.
+    let (b, o) = (book(true, 43_830.0, 100.0, false), book(false, 45_292.0, 200.0, true));
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 20), "{:?}", c.summary);
+}
+
+#[test]
+fn numbers_a_format_does_not_date_keep_their_tokens_across_date_systems() {
+    // `[>=40000]yyyy-mm-dd;0` shows only large numbers as dates. The small
+    // ones in this column are plain counts, the same in both workbooks, and
+    // must go on pairing rows: shifted by the date offset on one side only,
+    // they would not.
+    let main = xldif_fixtures::raw::MAIN_NS;
+    let styles = format!(
+        r#"<styleSheet xmlns="{main}"><numFmts count="1"><numFmt numFmtId="164" formatCode="[&gt;=40000]yyyy-mm-dd;0"/></numFmts><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="164" applyNumberFormat="1"/></cellXfs></styleSheet>"#
+    );
+    let book = |date1904: bool, extra: bool| {
+        use std::fmt::Write as _;
+        let mut xml = String::new();
+        let mut r = 1;
+        for i in 0..20u32 {
+            if extra && i == 8 {
+                let _ = write!(
+                    xml,
+                    r#"<row r="{r}"><c r="A{r}" s="1"><v>9001</v></c><c r="B{r}" s="1"><v>9002</v></c></row>"#
+                );
+                r += 1;
+            }
+            let (a, b) = (100 + i * 7, 500 + i * 3);
+            let _ =
+                write!(xml, r#"<row r="{r}"><c r="A{r}" s="1"><v>{a}</v></c><c r="B{r}" s="1"><v>{b}</v></c></row>"#);
+            r += 1;
+        }
+        let book = xldif_fixtures::raw::RawBook::new()
+            .workbook_rel("styles", "styles.xml")
+            .part("xl/styles.xml", styles.as_bytes());
+        let book = if date1904 { book.workbook_before(r#"<workbookPr date1904="1"/>"#) } else { book };
+        read_bytes(book.sheet("Counts", &xml).build()).unwrap()
+    };
+    let c = compare("a", &book(true, false), "b", &book(false, true), CompareOptions::default());
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 0), "{:?}", c.summary);
+}
+
 /// Account rows under period columns headed by dates (serials, formatted).
 fn period_book(periods: &[f64], rows: &[(&str, &[f64])]) -> Vec<u8> {
     use xldif_fixtures::rust_xlsxwriter::{Format, Workbook};

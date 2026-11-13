@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::align::Item;
 use crate::formula;
+use crate::links::LinkMap;
 use crate::model::{Cell, Row, Sheet, Value};
 use crate::numfmt::Formats;
 
@@ -138,17 +139,17 @@ pub fn numeric_text(text: &str) -> Option<f64> {
     Some(if negative { -n } else { n } * scale)
 }
 
-/// What a cell at `row` contributes to alignment: its value and, when it
-/// has one, its formula in position-free form (so `=B5*2` in row 5 and
-/// `=B6*2` in row 6 are the same token, as they are after an insertion). A
-/// cell with neither (formatting only, or an empty string) contributes
-/// nothing, so its row or column is not an item at all.
-pub(super) fn cell_tokens(cell: &Cell, row: u32, tolerance: f64) -> impl Iterator<Item = Vec<u8>> + '_ {
-    let formula = cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| {
-        let form = formula::relative_form(&formula::tokenize(&f.text), row, cell.col);
-        [b"f".as_slice(), form.as_bytes()].concat()
-    });
-    value_bytes(&cell.value, tolerance).into_iter().chain(formula)
+/// What tokens are read with besides the cells, so that two cells the
+/// comparison will call equal are equal to the alignment too.
+#[derive(Clone, Copy)]
+pub(super) struct Reading<'a> {
+    /// The comparison's tolerance, for number tokens.
+    pub(super) tolerance: f64,
+    /// When the two workbooks use different date systems: what to add to
+    /// this workbook's date serials to put them on the 1900 scale.
+    pub(super) date_offset: Option<f64>,
+    /// For the base workbook: its external links in the other's numbering.
+    pub(super) links: Option<&'a LinkMap>,
 }
 
 pub(super) fn display_label(text: &str) -> String {
@@ -189,12 +190,13 @@ pub(super) struct Grid<'a> {
     /// Each column's header texts in the top content rows, in row order;
     /// the first is the column's label.
     pub(super) headers: HashMap<u32, Vec<String>>,
-    /// The comparison's tolerance, for number tokens.
-    pub(super) tolerance: f64,
+    reading: Reading<'a>,
+    /// With a date offset: the cells, by row and column, that show a date.
+    dates: HashSet<(u32, u32)>,
 }
 
 impl<'a> Grid<'a> {
-    pub(super) fn new(sheet: &'a Sheet, formats: &Formats, tolerance: f64) -> Self {
+    pub(super) fn new(sheet: &'a Sheet, formats: &Formats, reading: Reading<'a>) -> Self {
         let has_tokens =
             |c: &Cell| value_bytes(&c.value, 0.0).is_some() || c.formula.as_ref().is_some_and(|f| !f.text.is_empty());
         let rows: Vec<&Row> = sheet.rows.iter().filter(|r| r.cells.iter().any(has_tokens)).collect();
@@ -227,7 +229,44 @@ impl<'a> Grid<'a> {
                 (*col, texts)
             })
             .collect();
-        Self { sheet, rows, cols, headers, tolerance }
+        // A cell shows a date when the section of its format that applies
+        // to its value does (`[>=1000]yyyy-mm-dd;0` dates only large
+        // numbers), and the date has a day: a time of day alone is the same
+        // number in both date systems. This is how the comparison decides.
+        let dates = if reading.date_offset.is_some() {
+            let shows_a_date = |c: &Cell| formats.iso_date(c.style, &c.value).is_some_and(|d| d.contains('-'));
+            rows.iter().flat_map(|r| r.cells.iter().filter(|c| shows_a_date(c)).map(|c| (r.index, c.col))).collect()
+        } else {
+            HashSet::new()
+        };
+        Self { sheet, rows, cols, headers, reading, dates }
+    }
+
+    /// A cell's value as an alignment token. Under different date systems a
+    /// date is read on one scale, as the comparison reads it.
+    fn value_token(&self, cell: &Cell, row: u32) -> Option<Vec<u8>> {
+        match (&cell.value, self.reading.date_offset) {
+            (Value::Number(n), Some(offset)) if self.dates.contains(&(row, cell.col)) => {
+                value_bytes(&Value::Number(n + offset), self.reading.tolerance)
+            }
+            _ => value_bytes(&cell.value, self.reading.tolerance),
+        }
+    }
+
+    /// What a cell at `row` contributes to alignment: its value and, when it
+    /// has one, its formula in position-free form (so `=B5*2` in row 5 and
+    /// `=B6*2` in row 6 are the same token, as they are after an insertion),
+    /// with external links in the other workbook's numbering. A cell with
+    /// neither (formatting only, or an empty string) contributes nothing, so
+    /// its row or column is not an item at all.
+    fn cell_tokens(&self, cell: &Cell, row: u32) -> impl Iterator<Item = Vec<u8>> {
+        let formula = cell.formula.as_ref().filter(|f| !f.text.is_empty()).map(|f| {
+            let tokens = formula::tokenize(&f.text);
+            let relinked = self.reading.links.and_then(|links| links.relink(&tokens));
+            let form = formula::relative_form(relinked.as_deref().unwrap_or(&tokens), row, cell.col);
+            [b"f".as_slice(), form.as_bytes()].concat()
+        });
+        self.value_token(cell, row).into_iter().chain(formula)
     }
 
     /// A hash of everything alignment reads, to put two grids in a fixed
@@ -241,7 +280,7 @@ impl<'a> Grid<'a> {
         }
         for row in &self.rows {
             for c in &row.cells {
-                let value = value_bytes(&c.value, self.tolerance).unwrap_or_default();
+                let value = value_bytes(&c.value, self.reading.tolerance).unwrap_or_default();
                 let formula = c.formula.as_ref().map_or("", |f| f.text.as_str());
                 mix(&[&row.index.to_le_bytes(), &c.col.to_le_bytes(), &value, formula.as_bytes()]);
             }
@@ -295,9 +334,8 @@ impl<'a> Grid<'a> {
                     .flat_map(|(r, c)| {
                         // A column's formulas change form whenever a column they
                         // refer to moves, so they only stand in for a missing value.
-                        let value = value_bytes(&c.value, self.tolerance);
-                        let formula =
-                            if value.is_none() { cell_tokens(c, *r, self.tolerance).collect() } else { Vec::new() };
+                        let value = self.value_token(c, *r);
+                        let formula = if value.is_none() { self.cell_tokens(c, *r).collect() } else { Vec::new() };
                         value.into_iter().chain(formula)
                     })
                     .map(|b| fnv(&[&b]))
@@ -319,9 +357,7 @@ impl<'a> Grid<'a> {
                 for c in &row.cells {
                     let Some(id) = col_ids.get(&c.col) else { continue };
                     let before = tokens.len();
-                    tokens.extend(
-                        cell_tokens(c, row.index, self.tolerance).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])),
-                    );
+                    tokens.extend(self.cell_tokens(c, row.index).map(|bytes| fnv(&[&id.to_le_bytes(), &bytes])));
                     if tokens.len() > before {
                         shape.extend_from_slice(&id.to_le_bytes());
                     }

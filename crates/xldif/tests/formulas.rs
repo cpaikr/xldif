@@ -408,3 +408,63 @@ fn a_rewrite_through_a_renumbered_link_shows_the_expected_formula() {
     assert_eq!(objects(&c), ["name:Rate Changed [1]Sheet1!$A$1→[1]Sheet1!$A$1"]);
     assert_eq!(c.objects[0].expected.as_deref(), Some("[2]Sheet1!$A$1"));
 }
+
+#[test]
+fn a_validation_list_follows_a_renumbered_link() {
+    // A list validation whose source is in another workbook. The other
+    // workbook links to one more file first, so the same source is `[2]`.
+    let book = |links: &[&str], source: &str| {
+        let main = xldif_fixtures::raw::MAIN_NS;
+        let xml = format!(
+            r#"<worksheet xmlns="{main}"><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData><dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>{source}</formula1></dataValidation></dataValidations></worksheet>"#
+        );
+        let mut book = xldif_fixtures::raw::RawBook::new().sheet_part("Entry", &xml);
+        for target in links {
+            book = book.external_link(target);
+        }
+        read_bytes(book.build()).unwrap()
+    };
+    let validations = |c: &Comparison| c.sheets[0].changes.iter().filter(|c| c.kind == Kind::Validation).count();
+    let base = book(&["Lists.xlsx"], "[1]Codes!$A$1:$A$9");
+    let renumbered = book(&["Budget.xlsx", "Lists.xlsx"], "[2]Codes!$A$1:$A$9");
+    assert_eq!(validations(&compare_books(&base, &renumbered)), 0);
+    // The same number for the new first link reads another file.
+    let another = book(&["Budget.xlsx", "Lists.xlsx"], "[1]Codes!$A$1:$A$9");
+    assert_eq!(validations(&compare_books(&base, &another)), 1);
+}
+
+#[test]
+fn rows_of_linked_formulas_pair_through_a_renumbered_link() {
+    // Rows with no labels, each a formula into another workbook, and a row
+    // inserted. The link is `[1]` in one workbook and `[2]` in the other, so
+    // a row's formula is the same token on both sides only when read in one
+    // numbering; otherwise each row shares its value alone, too little to
+    // pair.
+    let book = |links: &[&str], link: u32, bump: u32, extra: bool| {
+        use std::fmt::Write as _;
+        let mut xml = String::new();
+        let mut r = 1;
+        for i in 0..12u32 {
+            if extra && i == 5 {
+                let _ = write!(xml, r#"<row r="{r}"><c r="A{r}"><v>999</v></c></row>"#);
+                r += 1;
+            }
+            let _ = write!(
+                xml,
+                r#"<row r="{r}"><c r="A{r}"><f>[{link}]Data!$A${}</f><v>{}</v></c></row>"#,
+                i + 1,
+                i * 10 + bump
+            );
+            r += 1;
+        }
+        let mut book = xldif_fixtures::raw::RawBook::new().sheet("Pull", &xml);
+        for target in links {
+            book = book.external_link(target);
+        }
+        read_bytes(book.build()).unwrap()
+    };
+    let (base, other) = (book(&["Data.xlsx"], 1, 0, false), book(&["Budget.xlsx", "Data.xlsx"], 2, 0, true));
+    let c = compare_books(&base, &other);
+    assert_eq!((c.summary.rows_only_other, c.summary.rows_only_base, c.summary.value), (1, 0, 0), "{:?}", c.summary);
+    assert!(formulas(&c).is_empty(), "{:?}", formulas(&c));
+}

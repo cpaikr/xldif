@@ -27,7 +27,7 @@ mod grid;
 pub use axis::Axis;
 use axis::{Aligned, align_grids};
 use cells::{Shared, date_offset, order_key, sheet_changes};
-use grid::{Grid, fnv, value_bytes};
+use grid::{Grid, Reading, fnv, value_bytes};
 pub use grid::{label_key, numeric_text};
 
 use std::collections::{HashMap, HashSet};
@@ -407,13 +407,20 @@ pub fn compare(
     let pairs = pair_sheets(base, other);
     let moved = moved_sheets(&pairs);
     let formats = (Formats::new(&base.styles, base.date1904), Formats::new(&other.styles, other.date1904));
+    let date_offsets = (base.date1904 != other.date1904).then(|| (date_offset(base), date_offset(other)));
+    let links = LinkMap::new(&base.external_links, &other.external_links);
     // Align every sheet pair first: formulas refer across sheets, so each
     // sheet's comparison needs every other sheet's row and column maps.
     let aligned: Vec<(usize, usize, bool, Grid, Grid, Aligned)> = pairs
         .iter()
         .map(|&(bi, oi, renamed)| {
-            let grid = |sheet, formats| Grid::new(sheet, formats, options.tolerance);
-            let (gb, go) = (grid(&base.sheets[bi], &formats.0), grid(&other.sheets[oi], &formats.1));
+            let reading = |offset: f64, links| Reading {
+                tolerance: options.tolerance,
+                date_offset: date_offsets.map(|_| offset),
+                links,
+            };
+            let gb = Grid::new(&base.sheets[bi], &formats.0, reading(date_offset(base), Some(&links)));
+            let go = Grid::new(&other.sheets[oi], &formats.1, reading(date_offset(other), None));
             let al = align_grids(&gb, &go, options);
             (bi, oi, renamed, gb, go, al)
         })
@@ -433,8 +440,6 @@ pub fn compare(
     let mut sheets = Vec::new();
     let mut adjusted = 0;
     let mut paired_other = vec![false; other.sheets.len()];
-    let date_offsets = (base.date1904 != other.date1904).then(|| (date_offset(base), date_offset(other)));
-    let links = LinkMap::new(&base.external_links, &other.external_links);
     let shared = Shared { maps: &maps, inverse: &inverse, options, formats, date_offsets, links: &links };
     for (bi, b) in base.sheets.iter().enumerate() {
         let id = format!("s{}", sheets.len());
@@ -452,7 +457,7 @@ pub fn compare(
             crate::diff_objects::Side { sheet: b, styles: &base.styles },
             crate::diff_objects::Side { sheet: o, styles: &other.styles },
         );
-        changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, back));
+        changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, back, &links));
         changes.sort_by_key(order_key);
         if al.fell_back {
             warnings.push(Warning {
