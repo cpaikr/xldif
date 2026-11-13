@@ -31,7 +31,7 @@ Status:
   report (aligned grids side by side, inserted/deleted/moved rows and
   columns marked, cells colored by change kind, next/previous navigation,
   sheet list, details panel, "changes only" view, large sheets trimmed to
-  changed rows and their context). Checked in a browser on a synthetic
+  changed rows and their context, long added or removed runs folded). Checked in a browser on a synthetic
   demo pair (`cargo run -p xldif-fixtures --example write_demo -- DIR`).
 - M5 is done except publishing: the `xldif` agent skill (`skills/xldif`,
   with evals on the synthetic demo pair) and a release workflow that builds
@@ -466,9 +466,21 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
   - Clicking a cell shows old and new value, formula (with `expected`), and
     changed format properties.
   - Cell text uses the display string; fonts and fills are drawn lightly.
-- **Size:** runs of unchanged rows collapse to "… N same rows" with a few
-  context rows around each change. Hard limits on rendered cells add a
-  visible warning instead of producing a huge file.
+- **Size:** the report draws what changed, so that a workbook of large
+  sheets still opens and responds in a browser. Drawing every sheet whole
+  made a report too heavy to use (seen on a real pair, 2026-11-13).
+  - A sheet with no changes has no grid, and neither has one whose changes
+    touch none of its rows (a sheet property, an object, the format of an
+    empty column); those are listed in the details.
+  - A changed sheet of up to 20,000 cells is drawn whole, and "changes
+    only" hides its unchanged rows. A larger one has only its changed rows
+    and two rows of context each way.
+  - A run of more than 20 rows that are all added or all removed is folded
+    to five rows at each end and one row that counts the rest. The folded
+    rows' content is not in the report.
+  - A sheet whose drawn rows still exceed 250,000 cells has no grid; its
+    changes are listed.
+  - Each sheet waits in a `<template>` and is laid out when first opened.
 
 ## Agent skill
 

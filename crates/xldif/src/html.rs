@@ -19,8 +19,17 @@ use crate::numfmt::Formats;
 /// "changes only" view.
 const CONTEXT_ROWS: usize = 2;
 /// Above this many cells in a sheet's grid, only changed rows and their
-/// context are rendered.
+/// context are rendered: a workbook of large sheets otherwise makes a
+/// report too heavy for a browser.
+const FULL_GRID_CELLS: usize = 20_000;
+/// Above this many drawn cells, a sheet has no grid and its changes are
+/// listed instead.
 const MAX_GRID_CELLS: usize = 250_000;
+/// A run of more than this many rows that are all only in the base, or all
+/// only in the other workbook, is folded to its ends.
+const FOLD_OVER: usize = 20;
+/// The rows drawn at each end of a folded run.
+const FOLD_KEEP: usize = 5;
 
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -141,7 +150,7 @@ fn render_sheet(
             if s.status == Status::OnlyBase { "only in the base workbook" } else { "only in the other workbook" };
         let _ = write!(
             out,
-            "<section class=\"sheet\" data-s=\"{index}\"><p class=\"lone\">This sheet is {what}.</p></section>"
+            "<section class=\"sheet\" data-s=\"{index}\"><template><p class=\"lone\">This sheet is {what}.</p></template></section>"
         );
         return;
     };
@@ -207,13 +216,43 @@ fn render_sheet(
                 .any(|j| row_changed[j])
         })
         .collect();
-    let trimmed = rows.len() * cols.len().max(1) > MAX_GRID_CELLS;
-    let drawn = if trimmed { near.iter().filter(|n| **n).count() } else { rows.len() };
-    let _ = write!(out, "<section class=\"sheet\" data-s=\"{index}\">");
+    // Each sheet's content sits in a `<template>`, which a browser parses
+    // but does not lay out; the script moves it into the page when the
+    // sheet is opened.
+    let _ = write!(out, "<section class=\"sheet\" data-s=\"{index}\"><template>");
+    if !near.iter().any(|n| *n) {
+        let what = if s.changes.is_empty() {
+            "This sheet has no changes."
+        } else {
+            "This sheet's changes are not in its cells; they are listed in the details."
+        };
+        let _ = write!(out, "<p class=\"lone\" data-nogrid=\"1\">{what}</p></template></section>");
+        return;
+    }
+    let trimmed = rows.len() * cols.len().max(1) > FULL_GRID_CELLS;
+    let mut draw: Vec<bool> = near.iter().map(|n| !trimmed || *n).collect();
+    // The first row a fold hides → how many it hides.
+    let mut folds: HashMap<usize, usize> = HashMap::new();
+    let mut i = 0;
+    while i < rows.len() {
+        let status = rows[i].status;
+        let mut j = i + 1;
+        if matches!(status, Status::OnlyBase | Status::OnlyOther) {
+            while j < rows.len() && rows[j].status == status {
+                j += 1;
+            }
+            if j - i > FOLD_OVER {
+                draw[i + FOLD_KEEP..j - FOLD_KEEP].fill(false);
+                folds.insert(i + FOLD_KEEP, j - i - 2 * FOLD_KEEP);
+            }
+        }
+        i = j;
+    }
+    let drawn = draw.iter().filter(|d| **d).count();
     if drawn * cols.len().max(1) > MAX_GRID_CELLS {
         let _ = write!(
             out,
-            "<p class=\"warn\" data-nogrid=\"1\">This sheet's changes span too much of it to draw ({} rows × {} columns); every change is listed below.</p></section>",
+            "<p class=\"warn\" data-nogrid=\"1\">This sheet's changes span too much of it to draw ({} rows × {} columns); every change is listed below.</p></template></section>",
             drawn,
             cols.len()
         );
@@ -236,7 +275,7 @@ fn render_sheet(
             let longest = rows
                 .iter()
                 .enumerate()
-                .filter(|(i, _)| !trimmed || near[*i])
+                .filter(|(i, _)| draw[*i])
                 .flat_map(|(_, r)| {
                     [(base, 0, r.base, c.base), (other, 1, r.other, c.other)].into_iter().filter_map(
                         |(sheet, side, row, col)| {
@@ -273,16 +312,44 @@ fn render_sheet(
         }
         out.push_str("</tr></thead><tbody>");
         for (i, r) in rows.iter().enumerate() {
-            if trimmed && !near[i] {
-                continue;
-            }
-            let n = if side == 0 { r.base } else { r.other };
             let status = match r.status {
                 Status::OnlyBase => " rb",
                 Status::OnlyOther => " ro",
                 Status::Moved => " rm",
                 _ => "",
             };
+            if let Some(&hidden) = folds.get(&i) {
+                // One row stands for the hidden ones on both sides, so the
+                // grids stay aligned; it carries their changes.
+                let number = |slot: &Slot| if side == 0 { slot.base } else { slot.other };
+                let span = cols.len().max(1);
+                let _ = write!(out, "<tr class=\"r{status} chg ctx fold\" data-i=\"{i}\"");
+                if let (Some(first), Some(last)) = (number(r), number(&rows[i + hidden - 1])) {
+                    // The hidden rows' own numbers: a moved row's number can
+                    // lie between them.
+                    let mut ids: Vec<usize> = rows[i..i + hidden]
+                        .iter()
+                        .filter_map(|slot| on_row[side].get(&number(slot)?))
+                        .flatten()
+                        .copied()
+                        .collect();
+                    ids.sort_unstable();
+                    ids.dedup();
+                    if !ids.is_empty() {
+                        let _ = write!(out, " data-c=\"{}\"", join_ids(&ids));
+                    }
+                    let _ = write!(
+                        out,
+                        "><th class=\"rn\">⋮</th><td colspan=\"{span}\">{hidden} more rows between {first} and {last}, not drawn</td></tr>"
+                    );
+                } else {
+                    let _ = write!(out, "><th class=\"rn\"></th><td class=\"void\" colspan=\"{span}\"></td></tr>");
+                }
+            }
+            if !draw[i] {
+                continue;
+            }
+            let n = if side == 0 { r.base } else { r.other };
             let flags = format!("{}{}", if row_changed[i] { " chg" } else { "" }, if near[i] { " ctx" } else { "" });
             let _ = write!(out, "<tr class=\"r{status}{flags}\" data-i=\"{i}\"");
             if let Some(ids) = n.and_then(|n| on_row[side].get(&n)) {
@@ -324,7 +391,7 @@ fn render_sheet(
         }
         out.push_str("</tbody></table></div>");
     }
-    out.push_str("</div></section>");
+    out.push_str("</div></template></section>");
 }
 
 fn cell_row(sheet: &Sheet, row: u32) -> Option<&[Cell]> {
@@ -391,6 +458,7 @@ table.grid{border-collapse:separate;border-spacing:0;font-size:12px;table-layout
 .grid thead th.rn{z-index:3}
 .grid td.num{text-align:right;font-variant-numeric:tabular-nums}
 .grid tr.rb td{background:var(--del)}.grid tr.ro td{background:var(--ins)}.grid tr.rm td{background:var(--mov)}
+.grid tr.fold td{color:var(--muted);font-style:italic}
 .grid tr td.void{background:repeating-linear-gradient(135deg,#f6f7f9 0 6px,#eceef1 6px 12px)}
 .grid .cb{background:var(--del)}.grid .co{background:var(--ins)}.grid .cm{background:var(--mov)}
 .pane.b td.kv{background:var(--del);color:var(--del-ink);font-weight:600}
@@ -398,7 +466,7 @@ table.grid{border-collapse:separate;border-spacing:0;font-size:12px;table-layout
 td.kf{box-shadow:inset 0 0 0 2px var(--fx)}
 td.km{outline:1px dashed #b45309;outline-offset:-3px}
 td.ko{box-shadow:inset 3px 0 #0e7490}
-td[data-c],th[data-c]{cursor:pointer}
+td[data-c],th[data-c],tr.fold[data-c]{cursor:pointer}
 .grid thead th[data-c]{color:var(--ink);font-weight:700}
 td.hot,th.hot{outline:2px solid var(--accent)!important;outline-offset:-2px}
 body.only .grid tbody tr:not(.ctx){display:none}
@@ -441,15 +509,15 @@ const SCRIPT: &str = r#"
   }
   function show(ids,s){
     var sheet=data.sheets[s]; if(!sheet) return;
-    info.innerHTML=ids.map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>';
+    var more=ids.length-50;
+    info.innerHTML=(ids.slice(0,50).map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>')+(more>0?'<p>… and '+more+' more changes here.</p>':'');
     if(!body.classList.contains('info')) document.getElementById('infobtn').click();
   }
   function line(c,i){ return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'; }
   function objects(s){
     // Every change the grid does not mark (objects, formatting on rows with
     // no values, changes too large to mark) is listed here.
-    var sheet=data.sheets[s], sec=sheets[s], all=sec&&sec.querySelector('[data-nogrid]'), rest=[], marked={};
-    if(sec) [].forEach.call(sec.querySelectorAll('[data-c]'),function(el){ el.getAttribute('data-c').split(' ').forEach(function(i){ marked[i]=1; }); });
+    var sheet=data.sheets[s], sec=sheets[s], all=sec&&sec.querySelector('[data-nogrid]'), rest=[], marked=sec?sec.view.marked:{};
     (sheet?sheet.changes:[]).forEach(function(c,i){ if(all||!marked[i]) rest.push(i); });
     var h='';
     if(rest.length) h+='<h3>'+(all?'Changes on this sheet':'Changes not marked in the grid')+'</h3><table class="cl">'+rest.map(function(i){return line(sheet.changes[i],i)}).join('')+'</table>';
@@ -458,31 +526,46 @@ const SCRIPT: &str = r#"
       return '<tr><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(c.id)+'</td><td>'+esc(detail)+'</td></tr>'}).join('')+'</table>';
     return h;
   }
-  // Every place a change shows, on either side: column headers, row
-  // headers, and cells. A place on both sides is one stop (the other side's
-  // element); a change only on the base side (a removed comment) still gets
-  // a stop. Stops run top to bottom, left to right.
-  function collect(sec){
-    var seen={}, list=[];
-    function add(el,row,col){ var k=row+':'+col; if(seen[k]) return; seen[k]=1; list.push({el:el,row:row,col:col}); }
+  // A sheet's content waits in a <template> until the sheet is first
+  // opened; its grids are then read once into `sec.view`:
+  // - stops: every place a change shows, on either side (column headers,
+  //   row headers, cells), top to bottom, left to right. A place on both
+  //   sides is one stop (the other side's element); a change only on the
+  //   base side (a removed comment) still gets a stop.
+  // - index: 'row:col' → its stop; rows: row → its <tr> in each pane;
+  //   heads: each pane's header row; marked: the changes the grid marks.
+  function load(sec){
+    if(sec.view) return sec.view;
+    var t=sec.firstElementChild;
+    if(t&&t.tagName==='TEMPLATE'){ sec.appendChild(t.content); sec.removeChild(t); }
+    var view=sec.view={stops:[],index:{},rows:{},heads:[],marked:{}}, seen={};
+    function add(el,owner,row,col){
+      owner.getAttribute('data-c').split(' ').forEach(function(i){ view.marked[i]=1; });
+      var k=row+':'+col; if(seen[k]) return; seen[k]=1; view.stops.push({el:el,row:row,col:col});
+    }
     ['.pane.o','.pane.b'].forEach(function(p){
       var pane=sec.querySelector(p); if(!pane) return;
-      [].forEach.call(pane.querySelectorAll('thead th[data-c]'),function(th){ add(th,-1,[].indexOf.call(th.parentNode.children,th)); });
+      var head=pane.querySelector('thead tr'); view.heads.push(head);
+      [].forEach.call(head.children,function(th,col){ if(th.hasAttribute('data-c')) add(th,th,-1,col); });
       [].forEach.call(pane.querySelectorAll('tbody tr'),function(tr){
         var i=Number(tr.getAttribute('data-i'));
-        if(tr.hasAttribute('data-c')) add(tr.firstChild,i,0);
-        [].forEach.call(tr.querySelectorAll('td[data-c]'),function(td){ add(td,i,[].indexOf.call(tr.children,td)); });
+        (view.rows[i]=view.rows[i]||[]).push(tr);
+        if(tr.hasAttribute('data-c')) add(tr.firstChild,tr,i,0);
+        // Only a changed row has marked cells.
+        if(tr.classList.contains('chg')) [].forEach.call(tr.children,function(td,col){ if(td.hasAttribute('data-c')) add(td,td,i,col); });
       });
     });
-    list.sort(function(a,b){ return a.row-b.row||a.col-b.col; });
-    return list;
+    view.stops.sort(function(a,b){ return a.row-b.row||a.col-b.col; });
+    view.stops.forEach(function(st,k){ view.index[st.row+':'+st.col]=k; });
+    return view;
   }
   function open(s){
     current=s;
     sheets.forEach(function(x,i){x.classList.toggle('on',i===s)});
     links.forEach(function(a,i){a.classList.toggle('on',i===s)});
     var sec=sheets[s];
-    stops=sec?collect(sec):[];
+    stops=sec?load(sec).stops:[];
+    hot(null);
     at=-1; counter.textContent=stops.length?stops.length+' changes':'no cell changes';
     info.innerHTML=objects(s)||'';
     var o=sec&&sec.querySelector('.pane.o'), b=sec&&sec.querySelector('.pane.b');
@@ -495,12 +578,12 @@ const SCRIPT: &str = r#"
       if(dst.scrollTop!==src.scrollTop||dst.scrollLeft!==src.scrollLeft){ dst.scrollTop=src.scrollTop; dst.scrollLeft=src.scrollLeft; dst.echo=[dst.scrollTop,dst.scrollLeft]; }
     },{passive:true});
   }
+  var lit=[];
   function hot(stop){
-    [].forEach.call(document.querySelectorAll('.hot'),function(x){x.classList.remove('hot')});
+    lit.forEach(function(x){x.classList.remove('hot')}); lit=[];
     if(!stop) return;
-    var sec=sheets[current];
-    if(stop.row<0){ [].forEach.call(sec.querySelectorAll('thead tr'),function(tr){ var c=tr.children[stop.col]; if(c) c.classList.add('hot'); }); return; }
-    [].forEach.call(sec.querySelectorAll('tr[data-i="'+stop.row+'"]'),function(row){ var c=row.children[stop.col]; if(c) c.classList.add('hot'); });
+    var view=sheets[current].view;
+    (stop.row<0?view.heads:view.rows[stop.row]||[]).forEach(function(tr){ var c=tr.children[stop.col]; if(c){ c.classList.add('hot'); lit.push(c); } });
   }
   function ids(el){ return (el.getAttribute('data-c')||(el.parentNode&&el.parentNode.getAttribute('data-c'))||'').split(' ').filter(Boolean).map(Number); }
   function select(k){
@@ -528,11 +611,11 @@ const SCRIPT: &str = r#"
   links.forEach(function(a,i){ a.onclick=function(e){e.preventDefault(); open(i);}; });
   document.addEventListener('click',function(e){
     var el=e.target.closest('td[data-c], th[data-c], tr[data-c] th.rn');
+    var fold=!el&&e.target.closest('tr.fold[data-c]'); if(fold) el=fold.firstChild;
     if(el&&el.closest('section.sheet')){
-      var k=-1; stops.forEach(function(s,j){ if(s.el===el) k=j; });
-      if(k<0){ var tr=el.closest('tr'), row=el.closest('thead')?-1:Number(tr.getAttribute('data-i')), col=[].indexOf.call(tr.children,el);
-        stops.forEach(function(s,j){ if(s.row===row&&s.col===col) k=j; }); }
-      if(k>=0) select(k); else show(ids(el),current);
+      var tr=el.parentNode, row=tr.parentNode.tagName==='THEAD'?-1:Number(tr.getAttribute('data-i'));
+      var k=sheets[current].view.index[row+':'+[].indexOf.call(tr.children,el)];
+      if(k!==undefined) select(k); else show(ids(el),current);
       return;
     }
     var row=e.target.closest('#info tr[data-n]');
