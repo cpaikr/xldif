@@ -536,6 +536,33 @@ fn the_report_draws_a_small_changed_sheet_whole() {
 }
 
 #[test]
+fn the_report_holds_what_the_details_show_for_each_side() {
+    // The details panel reads the selected cell from the two grids: the
+    // column letter and row number from the headers, the formula from the
+    // cell's title, and the shown text from the cell. The script that does
+    // it has no test here; this pins what each grid gives it.
+    let book = |total: &str| {
+        let last = ["Total", total];
+        let rows: Vec<&[&str]> = vec![&["Cash", "100"], &["Debt", "200"], &last];
+        read_bytes(grid_book(&[("S", &rows)])).unwrap()
+    };
+    let (b, o) = (book("=B1+B2|300"), book("=SUM(B1:B2)|300"));
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.formula, c.summary.value), (1, 0));
+    let html = xldif::html::render_html(&c.list(&Filter { all: true, ..Filter::default() }), &b, &o, &[]);
+    let (_, rest) = html.split_once("<div class=\"pane b\">").unwrap();
+    let (base, other) = rest.split_once("<div class=\"pane o\">").unwrap();
+    for (pane, formula) in [(base, "=B1+B2"), (other, "=SUM(B1:B2)")] {
+        assert!(pane.contains("<th class=\"ch\">A</th><th class=\"ch\">B</th>"), "column letters");
+        let cell = format!(
+            "<th class=\"rn\">3</th><td class=\"\">Total</td><td class=\"kf num\" data-c=\"0\" data-a=\"B3\" title=\"{formula}\">300</td>"
+        );
+        assert!(pane.contains(&cell), "{formula} is not in its own pane");
+    }
+    assert!(!base.contains("=SUM(B1:B2)") && !other.split("</table>").next().unwrap().contains("=B1+B2"));
+}
+
+#[test]
 fn a_moved_row_that_was_also_resized_has_two_ids() {
     let rows = |order: &[u32], tall: bool| -> String {
         let mut out = String::new();
