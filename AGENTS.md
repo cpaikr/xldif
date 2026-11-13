@@ -60,6 +60,8 @@
   also runs parity and a compare smoke run (self-compares, swapped version
   pairs, HTML reports) over the private corpus, printing counts only.
   Parity needs `openpyxl`. On Windows with Excel and `pywin32` it also
-  checks display text against Excel on a synthetic probe; `--excel` adds
-  the private corpus.
+  checks display text against Excel on a synthetic probe and resolved cell
+  formats against Excel on the Excel-saved fixtures, and runs the tests
+  that drive Excel; `--excel` adds the private corpus to both checks (about
+  five minutes).
 - Run it after any change to code, the skill, or fixtures.

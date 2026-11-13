@@ -41,8 +41,10 @@ Status:
 - The project review (2026-11-11) kept Rust and the own reader and put
   correctness of the comparison ahead of new features. Its first fixes
   are in; the rest, in order, is in [TODO.md](TODO.md).
-- Next action: the maintainer decides the first release; what is left of
-  the review is in [TODO.md](TODO.md#review-follow-ups).
+- The review's follow-ups are done (alignment, the comparison model, Excel
+  as converter and oracle, the smaller defects).
+- Next action: the maintainer decides the first release. Features that
+  wait on it are in [TODO.md](TODO.md#features).
 
 ## Decisions
 
@@ -56,7 +58,7 @@ Status:
 | Scope | Two-file comparison only | Merging, comparing a series of versions, and range-to-range comparison are out of v1 |
 | JSON style | camelCase fields and dsdai's status words (`same`, `changed`, `onlyBase`, `onlyOther`, plus `moved`) | One vocabulary across the user's tools |
 | Fixtures | Synthetic workbooks written by `rust_xlsxwriter` with explicit formula results, plus hand-made Excel-saved files with invented content | rust_xlsxwriter stores 0 as every formula result unless told otherwise. Shared formulas, threaded comments, dynamic arrays, and real style inheritance only come from Excel |
-| Oracles | openpyxl for values and formulas; Excel COM (`Range.Text`, `DisplayFormat`, colours) on Windows for display strings and effective formats | Independent checks of the reader, not of xldif against itself |
+| Oracles | openpyxl for values and formulas; Excel COM on Windows for display strings (`Range.Text`) and for the cell's own format (`Range.Font`, `Interior`, `Borders`, alignment, protection) | Independent checks of the reader, not of xldif against itself. The format check reads the cell's own format, not `DisplayFormat`, which adds conditional formatting and table styles that xldif compares as rules or not at all. Theme and indexed colours stay symbolic in xldif and are not compared; Excel reports a shared edge's heavier border for both cells, so a lighter one is not compared either. On the private corpus (2026-11-13): 55,965 properties over 3,686 distinct formats agree, none differ |
 | Excel's role | A converter for inputs the reader rejects and a test oracle; never the reader | Reviewed 2026-11-11 with Excel on every machine that runs xldif: Excel reads formats one cell at a time through COM, which is far too slow, recalculates on open, and cannot run in CI. The reader's stored values stay the basis of a comparison |
 | Open workbooks | Read as last saved, with an `open_in_another_program` warning; `--unsaved` reads a copy the running Excel makes with `SaveCopyAs` | The saved file is what anyone else would get, so it stays the default. The copy leaves the open workbook unsaved and untouched. The workbook is found among registered running objects, never asked for by name, which would make Excel load a file that is not open. Not handled: a workbook opened from OneDrive or SharePoint (Excel knows it by its web address), Protected View, and Excel while a cell is being edited; each fails with `excel_failed` and a hint |
 | Confidentiality | Same rule as dsdai: real workbooks only under git-ignored `fixtures/private/`. Their contents, file names, and derived values never appear in tests, docs, or commits | Real inputs are audit workpapers |

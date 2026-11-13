@@ -9,18 +9,6 @@ milestones; this file holds what is left. Remove an item when it lands.
   release workflow accepts) picks the version, sets it in `Cargo.toml`, and
   pushes its `v*` tag ([AGENTS.md](AGENTS.md#release)).
 
-## Review follow-ups
-
-From the project review of 2026-11-11, in order.
-
-1. **Excel as format oracle.** Check the reader's resolved formats (font,
-   fill, borders, alignment, number format) against Excel's own
-   `DisplayFormat`, one cell per distinct style, on the Excel-saved
-   fixtures and with counts only on the private corpus. Colours compare
-   symbolically in xldif, so only explicit RGB colours can be checked.
-   Reading a `.xls`, `.xlsb`, or password-protected workbook through Excel
-   and the Excel-saved fixtures are done.
-
 ## Features
 
 - **`x14` validation and conditional formatting.** Newer Excel writes some

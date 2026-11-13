@@ -175,9 +175,14 @@ Contract version 1 (`metadata.contract`), the same shape as `dsd`:
 - [`scripts/display_parity.py`](scripts/display_parity.py) compares display
   text with Excel's own (`Range.Text`, through COM on Windows) on a
   synthetic probe of format codes, and on given workbooks with counts only.
+- [`scripts/format_parity.py`](scripts/format_parity.py) compares the cell
+  formats the reader resolves (font, fill, borders, alignment, protection)
+  with Excel's own, one cell for each distinct format of a workbook. Theme
+  and indexed colours, which xldif holds symbolically, are not compared.
 - [`scripts/check.py`](scripts/check.py) runs fmt, clippy, tests, a CLI smoke
   run, parity over the public fixtures and, when present, the private corpus,
   and a corpus compare smoke run: every workbook against itself must show no
   changes, and consecutive versions must compare, counting pairs that do not
   mirror when swapped (counts only). Where Excel is installed it also runs
-  the display probe; `--excel` adds the private corpus.
+  the display probe and the format check on the Excel-saved fixtures;
+  `--excel` adds the private corpus to both.
