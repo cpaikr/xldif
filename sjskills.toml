@@ -1,2 +1,2 @@
 version = 1
-profiles = ["dev", "rust"]
+profiles = ["dev", "kicpa-private", "rust"]
