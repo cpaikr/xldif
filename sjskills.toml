@@ -1,2 +1,6 @@
 version = 1
 profiles = ["dev", "rust"]
+
+[[direct]]
+name = "xldif"
+source = "./skills/xldif"
