@@ -1,2 +1,6 @@
 version = 1
-profiles = ["dev", "kicpa-private", "rust"]
+profiles = ["dev", "rust"]
+
+[[direct]]
+name = "xldif"
+source = "./skills/xldif"
