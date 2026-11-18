@@ -7,13 +7,15 @@
 //! The report is built from a comparison [`Listing`] and the two workbooks;
 //! it adds no comparison logic of its own.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 
 use crate::cellref::{cell_name, col_name};
-use crate::diff::{Axis, Change, Kind, Listing, SheetComparison, Status};
+use crate::diff::{Axis, Change, Kind, Listing, Location, SheetComparison, Status};
 use crate::model::{Cell, Sheet, Value, Workbook};
 use crate::numfmt::Formats;
+use crate::textdiff::{Marker, Marks};
+use crate::views::JsonValue;
 
 /// Rows with a change, plus this many neighbours, stay visible in
 /// "changes only" view.
@@ -391,6 +393,41 @@ struct Data<'a> {
 #[derive(serde::Serialize)]
 struct SheetData<'a> {
     changes: &'a [Change],
+    /// The parts to mark in a change's two texts, where they share enough
+    /// for that to help: keyed by the change's index for its value or
+    /// formula, and by `index.property` for one of its properties.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    marks: BTreeMap<String, Marks>,
+}
+
+/// One side of a value or formula change as the details panel shows it,
+/// when that is text: the formula, else a text value. The script's `val`
+/// chooses the same way, and the marks index what it returns.
+fn shown(loc: Option<&Location>) -> Option<String> {
+    let loc = loc?;
+    match (&loc.formula, &loc.value) {
+        (Some(formula), _) => Some(format!("={formula}")),
+        (None, Some(JsonValue::Text(text))) => Some(text.clone()),
+        (None, _) => None,
+    }
+}
+
+fn text_marks(changes: &[Change], marker: &mut Marker) -> BTreeMap<String, Marks> {
+    let mut out = BTreeMap::new();
+    for (i, change) in changes.iter().enumerate() {
+        if matches!(change.kind, Kind::Value | Kind::Formula)
+            && let (Some(base), Some(other)) = (shown(change.base.as_ref()), shown(change.other.as_ref()))
+            && let Some(marks) = marker.marks(&base, &other)
+        {
+            out.insert(i.to_string(), marks);
+        }
+        for (k, property) in change.properties.iter().enumerate() {
+            if let Some(marks) = marker.marks(&property.base, &property.other) {
+                out.insert(format!("{i}.{k}"), marks);
+            }
+        }
+    }
+    out
 }
 
 const STYLE: &str = r#"
@@ -463,6 +500,8 @@ body.info #info{display:block}
 #info .pr>div+div{border-left:1px solid var(--line)}
 #info .pr small{flex:none;width:130px;color:var(--muted);font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #info .pr.diff .b code{color:var(--del-ink)}#info .pr.diff .o code{color:var(--ins-ink)}
+#info del,#info ins{text-decoration:none;border-radius:2px}
+#info del{background:var(--del);color:var(--del-ink)}#info ins{background:var(--ins);color:var(--ins-ink)}
 #info .k{display:inline-block;margin-right:6px;padding:0 6px;border-radius:8px;background:var(--bg);font-size:11px}
 table.cl{border-collapse:collapse;width:calc(100% - 28px);margin-top:4px;margin-bottom:4px;font-size:12px}
 table.cl th,table.cl td{border-bottom:1px solid #e5e7eb;padding:2px 6px;text-align:left;vertical-align:top}
@@ -484,21 +523,28 @@ const SCRIPT: &str = r#"
   function esc(s){return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]})}
   function val(l){ if(!l) return ''; if(l.formula!==undefined) return '='+l.formula; if(l.value!==undefined) return typeof l.value==='string'?l.value:String(l.value); return l.text||''; }
   function where(l){ if(!l) return '–'; return l.range||l.cell||(l.row!==undefined?'row '+l.row:'')||(l.column?'column '+l.column:'')||''; }
-  // One row of the details: the base workbook's on the left, under its
-  // grid, and the other's on the right.
-  function pair(name,b,o,diff){
-    function half(side,text){ return '<div class="'+side+'"><small title="'+esc(name)+'">'+esc(name)+'</small><code>'+esc(text===''||text==null?'–':text)+'</code></div>'; }
-    return '<div class="pr'+(diff?' diff':'')+'">'+half('b',b)+half('o',o)+'</div>';
+  // `text` with each [start,end) of `runs` wrapped in `tag`.
+  function mark(text,runs,tag){
+    var h='', at=0;
+    runs.forEach(function(r){ h+=esc(text.slice(at,r[0]))+'<'+tag+'>'+esc(text.slice(r[0],r[1]))+'</'+tag+'>'; at=r[1]; });
+    return h+esc(text.slice(at));
   }
-  function describe(c){
+  // One row of the details: the base workbook's on the left, under its
+  // grid, and the other's on the right. A pair that differs is coloured
+  // whole, unless `marks` says which parts of the two texts differ.
+  function pair(name,b,o,diff,marks){
+    function half(side,text,tag){ return '<div class="'+side+'"><small title="'+esc(name)+'">'+esc(name)+'</small><code>'+(marks?mark(text,marks[side==='b'?'base':'other'],tag):esc(text===''||text==null?'–':text))+'</code></div>'; }
+    return '<div class="pr'+(diff&&!marks?' diff':'')+'">'+half('b',b,'del')+half('o',o,'ins')+'</div>';
+  }
+  function describe(c,marks,i){
     var h='<h3><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+' · '+esc(where(c.base))+' → '+esc(where(c.other))+'</h3>', rest='';
     if(c.labels){ var lb=[c.labels.row,c.labels.column].filter(Boolean).join(' | '); if(lb) rest+='<tr><th>label</th><td>'+esc(lb)+'</td></tr>'; }
     if(c.kind==='value'||c.kind==='formula'){
-      h+=pair(c.kind,val(c.base),val(c.other),true);
+      h+=pair(c.kind,val(c.base),val(c.other),true,marks[i]);
       if(c.delta!==undefined) rest+='<tr><th>delta</th><td class="d">'+esc((c.delta>0?'+':'')+c.delta)+'</td></tr>';
       if(c.expected) rest+='<tr><th>expected</th><td><code>='+esc(c.expected)+'</code></td></tr>';
     }
-    (c.properties||[]).forEach(function(p){ h+=pair(p.name,p.base,p.other,true); });
+    (c.properties||[]).forEach(function(p,k){ h+=pair(p.name,p.base,p.other,true,marks[i+'.'+k]); });
     if(!(c.properties||[]).length && c.kind!=='value' && c.kind!=='formula'){ var t=(c.other&&c.other.text)||(c.base&&c.base.text); if(t) rest+='<tr><th>content</th><td><code>'+esc(t)+'</code></td></tr>'; }
     return h+(rest?'<table class="cl">'+rest+'</table>':'');
   }
@@ -521,8 +567,8 @@ const SCRIPT: &str = r#"
   }
   function show(ids,s,stop){
     var sheet=data.sheets[s]; if(!sheet) return;
-    var more=ids.length-50;
-    info.innerHTML=cell(stop)+(ids.slice(0,50).map(function(i){return describe(sheet.changes[i])}).join('') || '<p>No changes here.</p>')+(more>0?'<p>… and '+more+' more changes here.</p>':'');
+    var more=ids.length-50, marks=sheet.marks||{};
+    info.innerHTML=cell(stop)+(ids.slice(0,50).map(function(i){return describe(sheet.changes[i],marks,i)}).join('') || '<p>No changes here.</p>')+(more>0?'<p>… and '+more+' more changes here.</p>':'');
     if(!body.classList.contains('info')) document.getElementById('infobtn').click();
   }
   function line(c,i){ return '<tr data-n="'+i+'"><td><span class="k">'+esc(c.kind)+'</span>'+esc(c.status)+'</td><td>'+esc(where(c.base))+' → '+esc(where(c.other))+'</td></tr>'; }
@@ -732,8 +778,15 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &
         render_sheet(&mut out, sheet, b, o, [&fb, &fo], i);
     }
     out.push_str("<div id=\"info\"></div></div></div>");
-    let data =
-        Data { sheets: cmp.sheets.iter().map(|s| SheetData { changes: &s.changes }).collect(), objects: &cmp.objects };
+    let mut marker = Marker::new();
+    let data = Data {
+        sheets: cmp
+            .sheets
+            .iter()
+            .map(|s| SheetData { changes: &s.changes, marks: text_marks(&s.changes, &mut marker) })
+            .collect(),
+        objects: &cmp.objects,
+    };
     let _ = write!(out, "<script type=\"application/json\" id=\"data\">{}</script>", json_for_script(&data));
     let _ = write!(out, "<script>{SCRIPT}</script></body></html>");
     out
@@ -741,8 +794,40 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &
 
 #[cfg(test)]
 mod tests {
-    use super::{Slot, slots};
-    use crate::diff::{Axis, Status};
+    use super::{Slot, slots, text_marks};
+    use crate::diff::{Axis, Change, Kind, Property, Status};
+    use crate::textdiff::Marker;
+
+    #[test]
+    fn a_changed_property_is_marked_under_its_own_key() {
+        let property = |name: &str, base: &str, other: &str| Property {
+            name: name.to_owned(),
+            base: base.to_owned(),
+            other: other.to_owned(),
+        };
+        let change = |properties: Vec<Property>| Change {
+            id: String::new(),
+            kind: Kind::Comment,
+            status: Status::Changed,
+            base: None,
+            other: None,
+            delta: None,
+            expected: None,
+            labels: None,
+            properties,
+        };
+        let changes = [
+            change(vec![]),
+            change(vec![
+                property("author", "Kim", "Lee"),
+                property("text", "Agreed to the ledger at year end", "Agreed to the ledger at period end"),
+            ]),
+        ];
+        let marks = text_marks(&changes, &mut Marker::new());
+        // The script looks a property's marks up as `change.property`.
+        assert_eq!(marks.keys().collect::<Vec<_>>(), ["1.1"]);
+        assert_eq!((&marks["1.1"].base, &marks["1.1"].other), (&vec![(24, 28)], &vec![(24, 30)]));
+    }
 
     fn axis(pairs: &[(u32, u32)], moves: &[(u32, u32)], lone_base: &[u32], lone_other: &[u32]) -> Axis {
         Axis {

@@ -563,6 +563,37 @@ fn the_report_holds_what_the_details_show_for_each_side() {
 }
 
 #[test]
+fn the_report_marks_the_changed_parts_of_long_texts() {
+    // The details panel colours a changed value whole unless the report's
+    // data says which parts differ. The script that draws the marks has no
+    // test here; this pins the ranges it is given, which index the text its
+    // `val` shows: a text value as it is, a formula after its `=`.
+    let book = |note: &str, rate: &str, total: &str| {
+        let rows = [["Note", note], ["Rate", rate], ["Total", total]];
+        let rows: Vec<&[&str]> = rows.iter().map(|r| &r[..]).collect();
+        read_bytes(grid_book(&[("S", &rows)])).unwrap()
+    };
+    let b = book("전환권은 자본으로 분류하였습니다.", "low", "=B10+B11|3");
+    let o = book("전환권은 자본으로 분류하였습니다. 부채요소는 별도로 평가하였습니다.", "high", "=B10+B12|3");
+    let c = compare("a", &b, "b", &o, CompareOptions::default());
+    assert_eq!((c.summary.value, c.summary.formula), (2, 1));
+    let listing = c.list(&Filter { all: true, ..Filter::default() });
+    let html = xldif::html::render_html(&listing, &b, &o, &[]);
+    let (_, rest) = html.split_once("<script type=\"application/json\" id=\"data\">").unwrap();
+    let data: serde_json::Value = serde_json::from_str(rest.split_once("</script>").unwrap().0).unwrap();
+    let at = |cell: &str| {
+        let i = listing.sheets[0].changes.iter().position(|c| c.other.as_ref().unwrap().cell().unwrap() == cell);
+        data["sheets"][0]["marks"][i.unwrap().to_string()].clone()
+    };
+    // The added sentence, with the space before it; nothing in the base.
+    assert_eq!(at("B1"), serde_json::json!({"base": [], "other": [[18, 37]]}));
+    // `low` and `high` share nothing: coloured whole, as before.
+    assert_eq!(at("B2"), serde_json::Value::Null);
+    // `=B10+B11` → `=B10+B12`: the second reference.
+    assert_eq!(at("B3"), serde_json::json!({"base": [[5, 8]], "other": [[5, 8]]}));
+}
+
+#[test]
 fn a_moved_row_that_was_also_resized_has_two_ids() {
     let rows = |order: &[u32], tall: bool| -> String {
         let mut out = String::new();
