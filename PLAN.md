@@ -470,6 +470,11 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     address, formula, and shown text on each side, then each change's old
     and new value or formula (with `delta` and `expected`) and changed
     format properties.
+  - A changed text or formula has only its changed parts coloured, compared
+    word by word, when the two sides share at least half the words of the
+    shorter one and at least three tokens; otherwise each side is coloured
+    whole. The grid marks the
+    cell, not parts of its text.
   - Cell text uses the display string; fonts and fills are drawn lightly.
 - **Size:** the report draws what changed, so that a workbook of large
   sheets still opens and responds in a browser. Drawing every sheet whole

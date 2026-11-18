@@ -18,6 +18,7 @@ mod package;
 pub mod reader;
 mod sheet_objects;
 pub mod styles;
+mod textdiff;
 pub mod views;
 mod xml;
 
