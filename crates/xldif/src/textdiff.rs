@@ -11,6 +11,11 @@ use serde::Serialize;
 /// Beyond it, only what the texts share at their start and end is found,
 /// and everything between is marked.
 const MAX_TABLE: usize = 4_000_000;
+/// The table cells all of one report's comparisons may fill: about a
+/// hundred of the largest. A workbook with thousands of long changed
+/// texts would otherwise take minutes to report. Once it is spent, the
+/// remaining texts keep only their shared start and end.
+const REPORT_TABLE: usize = 400_000_000;
 
 /// Texts that share fewer tokens than this, whitespace aside, are not
 /// marked: a short text found whole inside an unrelated longer one (`Q1`
@@ -74,8 +79,9 @@ fn tokens(text: &str) -> Vec<Token<'_>> {
 
 /// For each token of each text, whether the other text has it too, in
 /// the same order: a longest common subsequence, after what the texts share
-/// at their start and end.
-fn kept(base: &[Token<'_>], other: &[Token<'_>]) -> (Vec<bool>, Vec<bool>) {
+/// at their start and end. The table may have `limit` cells; the last value
+/// is how many it had.
+fn kept(base: &[Token<'_>], other: &[Token<'_>], limit: usize) -> (Vec<bool>, Vec<bool>, usize) {
     let same = |x: &Token<'_>, y: &Token<'_>| x.text == y.text;
     let head = base.iter().zip(other).take_while(|(x, y)| same(x, y)).count();
     let tail = base[head..].iter().rev().zip(other[head..].iter().rev()).take_while(|(x, y)| same(x, y)).count();
@@ -84,8 +90,9 @@ fn kept(base: &[Token<'_>], other: &[Token<'_>]) -> (Vec<bool>, Vec<bool>) {
     keep_a[head..head + mid_a.len()].fill(false);
     keep_b[head..head + mid_b.len()].fill(false);
     let (rows, cols) = (mid_a.len(), mid_b.len());
-    if rows == 0 || cols == 0 || rows.saturating_mul(cols) > MAX_TABLE {
-        return (keep_a, keep_b);
+    let table = rows.saturating_mul(cols);
+    if table == 0 || table > limit {
+        return (keep_a, keep_b, 0);
     }
     // common[i * width + j]: the longest common subsequence of
     // mid_a[i..] and mid_b[j..].
@@ -113,7 +120,7 @@ fn kept(base: &[Token<'_>], other: &[Token<'_>]) -> (Vec<bool>, Vec<bool>) {
             j += 1;
         }
     }
-    (keep_a, keep_b)
+    (keep_a, keep_b, table)
 }
 
 /// Moves each run of changed tokens as far towards the end of the text as
@@ -163,12 +170,16 @@ fn ranges(tokens: &[Token<'_>], kept: &[bool]) -> Vec<(u32, u32)> {
 /// they share less than half the words of the shorter one or fewer than
 /// [`MIN_SHARED`] tokens (two different texts, where the few tokens they
 /// happen to share would only be noise).
-pub fn marks(base: &str, other: &str) -> Option<Marks> {
+///
+/// Words count by their length, so that a shared `on the` does not make
+/// two sentences alike.
+fn marks_within(base: &str, other: &str, left: &mut usize) -> Option<Marks> {
     if base == other {
         return None;
     }
     let (a, b) = (tokens(base), tokens(other));
-    let (mut keep_a, mut keep_b) = kept(&a, &b);
+    let (mut keep_a, mut keep_b, used) = kept(&a, &b, MAX_TABLE.min(*left));
+    *left -= used;
     slide(&a, &mut keep_a);
     slide(&b, &mut keep_b);
     let words = |tokens: &[Token<'_>], keep: Option<&[bool]>| -> u32 {
@@ -187,9 +198,29 @@ pub fn marks(base: &str, other: &str) -> Option<Marks> {
     Some(Marks { base: ranges(&a, &keep_a), other: ranges(&b, &keep_b) })
 }
 
+/// Marks the texts of one report, within [`REPORT_TABLE`].
+pub struct Marker {
+    left: usize,
+}
+
+impl Marker {
+    pub const fn new() -> Self {
+        Self { left: REPORT_TABLE }
+    }
+
+    /// See [`marks_within`].
+    pub fn marks(&mut self, base: &str, other: &str) -> Option<Marks> {
+        marks_within(base, other, &mut self.left)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Marks, marks};
+    use super::{Marker, Marks};
+
+    fn marks(base: &str, other: &str) -> Option<Marks> {
+        Marker::new().marks(base, other)
+    }
 
     /// The marked parts of each text, as text.
     fn marked(base: &str, other: &str) -> Option<(Vec<String>, Vec<String>)> {
@@ -261,6 +292,18 @@ mod tests {
         // The shorter text is all in the longer one, and is still another text.
         assert_eq!(marks("Q1", "Revenue for Q1 rose sharply on export demand"), None);
         assert_eq!(marks("N/A", "A new note"), None);
+    }
+
+    #[test]
+    fn a_report_that_has_spent_its_work_keeps_shared_ends() {
+        let (base, other) =
+            ("alpha beta gamma delta one two three four five six", "alpha beta gamma delta one 2 three four 5 six");
+        let mut marker = Marker { left: 60 };
+        // 7 × 7 tokens between the shared ends: within the bound once.
+        assert_eq!(marker.marks(base, other).unwrap().base, [(27, 30), (42, 46)]);
+        assert_eq!(marker.left, 11);
+        assert_eq!(marker.marks(base, other).unwrap().base, [(27, 46)]);
+        assert_eq!(marker.left, 11);
     }
 
     #[test]

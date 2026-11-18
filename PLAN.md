@@ -472,7 +472,7 @@ Implemented in M1 (`align.rs`, `diff.rs`); tuned on the private corpus.
     format properties.
   - A changed text or formula has only its changed parts coloured, compared
     word by word, when the two sides share at least half the words of the
-    shorter one and at least three tokens; otherwise each side is coloured
+    shorter one (by length) and at least three tokens; otherwise each side is coloured
     whole. The grid marks the
     cell, not parts of its text.
   - Cell text uses the display string; fonts and fills are drawn lightly.

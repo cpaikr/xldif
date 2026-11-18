@@ -14,7 +14,7 @@ use crate::cellref::{cell_name, col_name};
 use crate::diff::{Axis, Change, Kind, Listing, Location, SheetComparison, Status};
 use crate::model::{Cell, Sheet, Value, Workbook};
 use crate::numfmt::Formats;
-use crate::textdiff::{self, Marks};
+use crate::textdiff::{Marker, Marks};
 use crate::views::JsonValue;
 
 /// Rows with a change, plus this many neighbours, stay visible in
@@ -412,17 +412,17 @@ fn shown(loc: Option<&Location>) -> Option<String> {
     }
 }
 
-fn text_marks(changes: &[Change]) -> BTreeMap<String, Marks> {
+fn text_marks(changes: &[Change], marker: &mut Marker) -> BTreeMap<String, Marks> {
     let mut out = BTreeMap::new();
     for (i, change) in changes.iter().enumerate() {
         if matches!(change.kind, Kind::Value | Kind::Formula)
             && let (Some(base), Some(other)) = (shown(change.base.as_ref()), shown(change.other.as_ref()))
-            && let Some(marks) = textdiff::marks(&base, &other)
+            && let Some(marks) = marker.marks(&base, &other)
         {
             out.insert(i.to_string(), marks);
         }
         for (k, property) in change.properties.iter().enumerate() {
-            if let Some(marks) = textdiff::marks(&property.base, &property.other) {
+            if let Some(marks) = marker.marks(&property.base, &property.other) {
                 out.insert(format!("{i}.{k}"), marks);
             }
         }
@@ -778,8 +778,13 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &
         render_sheet(&mut out, sheet, b, o, [&fb, &fo], i);
     }
     out.push_str("<div id=\"info\"></div></div></div>");
+    let mut marker = Marker::new();
     let data = Data {
-        sheets: cmp.sheets.iter().map(|s| SheetData { changes: &s.changes, marks: text_marks(&s.changes) }).collect(),
+        sheets: cmp
+            .sheets
+            .iter()
+            .map(|s| SheetData { changes: &s.changes, marks: text_marks(&s.changes, &mut marker) })
+            .collect(),
         objects: &cmp.objects,
     };
     let _ = write!(out, "<script type=\"application/json\" id=\"data\">{}</script>", json_for_script(&data));
@@ -789,8 +794,40 @@ pub fn render_html(cmp: &Listing, base: &Workbook, other: &Workbook, warnings: &
 
 #[cfg(test)]
 mod tests {
-    use super::{Slot, slots};
-    use crate::diff::{Axis, Status};
+    use super::{Slot, slots, text_marks};
+    use crate::diff::{Axis, Change, Kind, Property, Status};
+    use crate::textdiff::Marker;
+
+    #[test]
+    fn a_changed_property_is_marked_under_its_own_key() {
+        let property = |name: &str, base: &str, other: &str| Property {
+            name: name.to_owned(),
+            base: base.to_owned(),
+            other: other.to_owned(),
+        };
+        let change = |properties: Vec<Property>| Change {
+            id: String::new(),
+            kind: Kind::Comment,
+            status: Status::Changed,
+            base: None,
+            other: None,
+            delta: None,
+            expected: None,
+            labels: None,
+            properties,
+        };
+        let changes = [
+            change(vec![]),
+            change(vec![
+                property("author", "Kim", "Lee"),
+                property("text", "Agreed to the ledger at year end", "Agreed to the ledger at period end"),
+            ]),
+        ];
+        let marks = text_marks(&changes, &mut Marker::new());
+        // The script looks a property's marks up as `change.property`.
+        assert_eq!(marks.keys().collect::<Vec<_>>(), ["1.1"]);
+        assert_eq!((&marks["1.1"].base, &marks["1.1"].other), (&vec![(24, 28)], &vec![(24, 30)]));
+    }
 
     fn axis(pairs: &[(u32, u32)], moves: &[(u32, u32)], lone_base: &[u32], lone_other: &[u32]) -> Axis {
         Axis {
