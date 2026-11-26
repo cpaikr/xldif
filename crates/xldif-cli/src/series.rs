@@ -166,7 +166,7 @@ pub fn run(
                     notes.add(w.code, w.message, here.clone());
                 }
                 for w in step.pair_warnings {
-                    let base = compared_with.as_deref().map(&path_of).unwrap_or_default();
+                    let base = compared_with.as_deref().map(path_of).unwrap_or_default();
                     notes.add(w.code, w.message, format!("{here} vs {base}"));
                 }
                 view.versions.push(VersionView {
