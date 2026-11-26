@@ -2,6 +2,10 @@
 
 ## Run the comparison
 
+In the summary, `value` counts every value change; `valueInput` is the
+part between constants (what a person typed) and `valueComputed` the part on
+cells a formula fills, mostly recalculation after an edit elsewhere.
+
 Start broad, then narrow:
 
 1. `xldif compare BASE OTHER --format text` for an overview: the header line

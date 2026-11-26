@@ -7,6 +7,7 @@ mod cli;
 mod commands;
 mod envelope;
 mod excel;
+mod series;
 
 use std::io::Write as _;
 use std::panic::{AssertUnwindSafe, catch_unwind};

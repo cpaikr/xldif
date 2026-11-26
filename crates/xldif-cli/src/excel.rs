@@ -60,7 +60,7 @@ impl Drop for Scratch {
 /// Whether another program holds the file open and refuses writers, as
 /// Excel does with a workbook it has open for editing.
 #[cfg(windows)]
-fn in_use(path: &Path) -> bool {
+pub fn in_use(path: &Path) -> bool {
     const ERROR_SHARING_VIOLATION: i32 = 32;
     // Opening for writing writes nothing.
     matches!(
@@ -70,7 +70,7 @@ fn in_use(path: &Path) -> bool {
 }
 
 #[cfg(not(windows))]
-fn in_use(_: &Path) -> bool {
+pub fn in_use(_: &Path) -> bool {
     false
 }
 
@@ -176,7 +176,7 @@ pub fn read(path: &Path, unsaved: bool) -> Result<Workbook, Failure> {
                         "{} is open in another program, but no running Excel has it open under this path",
                         path.display()
                     ),
-                    "a workbook opened from OneDrive or SharePoint is known to Excel by its web address: save a                      local copy and compare that, or drop --unsaved to read the last saved state",
+                    "a workbook opened from OneDrive or SharePoint is known to Excel by its web address: save a local copy and compare that, or drop --unsaved to read the last saved state",
                 ));
             }
             Err(refusal) => {
@@ -189,7 +189,7 @@ pub fn read(path: &Path, unsaved: bool) -> Result<Workbook, Failure> {
     } else if held {
         notes.push(note(
             "open_in_another_program",
-            "the file is open in another program, probably Excel; this is its last saved state (pass --unsaved to              read what Excel has now)",
+            "the file is open in another program, probably Excel; this is its last saved state (pass --unsaved to read what Excel has now)",
         ));
     }
     let mut book = match xldif::read_path(&source) {

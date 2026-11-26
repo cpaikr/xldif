@@ -458,6 +458,8 @@ pub struct Summary {
     pub sheets_only_base: usize,
     pub sheets_only_other: usize,
     pub sheets_renamed: usize,
+    /// Paired sheets whose position among the paired sheets changed.
+    pub sheets_moved: usize,
     pub rows_only_base: usize,
     pub rows_only_other: usize,
     pub rows_moved: usize,
@@ -469,6 +471,13 @@ pub struct Summary {
     /// Columns whose width, hidden state, or column style changed.
     pub columns_changed: usize,
     pub value: usize,
+    /// Value changes between two constants: what a person typed, changed,
+    /// or cleared. Part of `value`.
+    pub value_input: usize,
+    /// Value changes on a cell a formula fills on either side (its own
+    /// formula, or an array formula's or data table's range): mostly
+    /// recalculation after an edit elsewhere. Part of `value`.
+    pub value_computed: usize,
     /// Formula changes, counting a folded run once.
     pub formula: usize,
     /// Formulas whose text differs only because Excel adjusted them for
@@ -493,6 +502,12 @@ pub struct Comparison {
     pub objects: Vec<Change>,
     #[serde(skip)]
     pub warnings: Vec<Warning>,
+    /// The part of `warnings` about the pair rather than either workbook
+    /// alone (different date systems, an alignment that fell back): what a
+    /// series of comparisons reports once per pair, having reported each
+    /// workbook's own warnings once per workbook.
+    #[serde(skip)]
+    pub pair_warnings: Vec<Warning>,
 }
 
 pub fn compare(
@@ -503,13 +518,14 @@ pub fn compare(
     options: CompareOptions,
 ) -> Comparison {
     let mut warnings = Vec::new();
+    let mut pair_warnings = Vec::new();
     for (side, book) in [("base", base), ("other", other)] {
         for w in book.warnings.iter().cloned().chain(stale_value_warnings(book)) {
             warnings.push(Warning { code: w.code, message: format!("{side}: {}", w.message) });
         }
     }
     if base.date1904 != other.date1904 {
-        warnings.push(Warning {
+        pair_warnings.push(Warning {
             code: "date_system_mismatch",
             message: "the workbooks use different date systems (1900 and 1904), so equal dates have different serial \
                       numbers; cells formatted as dates on both sides are compared by the date they show"
@@ -552,6 +568,7 @@ pub fn compare(
 
     let mut sheets = Vec::new();
     let mut adjusted = 0;
+    let mut computed = 0;
     let mut paired_other = vec![false; other.sheets.len()];
     let shared = Shared { maps: &maps, inverse: &inverse, options, formats, date_offsets, links: &links };
     for (bi, b) in base.sheets.iter().enumerate() {
@@ -564,8 +581,9 @@ pub fn compare(
         let o = &other.sheets[*oi];
         let this = &maps[&b.name.to_lowercase()];
         let back = &inverse[&o.name.to_lowercase()];
-        let (mut changes, n_adjusted) = sheet_changes(&id, gb, go, al, (this, back), &shared);
+        let (mut changes, n_adjusted, n_computed) = sheet_changes(&id, gb, go, al, (this, back), &shared);
         adjusted += n_adjusted;
+        computed += n_computed;
         let (bs, os) = (
             crate::diff_objects::Side { sheet: b, styles: &base.styles },
             crate::diff_objects::Side { sheet: o, styles: &other.styles },
@@ -573,7 +591,7 @@ pub fn compare(
         changes.extend(crate::diff_objects::sheet_object_changes(&id, bs, os, this, back, &links));
         changes.sort_by_key(order_key);
         if al.fell_back {
-            warnings.push(Warning {
+            pair_warnings.push(Warning {
                 code: "alignment_fallback",
                 message: format!(
                     "sheet {:?}: part of the sheet was too large to align fully by content; rows or columns there \
@@ -606,6 +624,8 @@ pub fn compare(
     objects.extend(crate::links::changes(&base.external_links, &other.external_links));
     let mut summary = summarize(&sheets);
     summary.formulas_adjusted = adjusted;
+    summary.value_computed = computed;
+    summary.value_input = summary.value - computed;
     summary.objects += objects.len();
     Comparison {
         base: Side { file: base_file.to_owned(), sheets: base.sheets.len(), date1904: base.date1904 },
@@ -613,7 +633,8 @@ pub fn compare(
         summary,
         sheets,
         objects,
-        warnings,
+        warnings: warnings.into_iter().chain(pair_warnings.iter().cloned()).collect(),
+        pair_warnings,
     }
 }
 
@@ -728,6 +749,7 @@ fn summarize(sheets: &[SheetComparison]) -> Summary {
             Status::Same | Status::Moved => {}
         }
         s.sheets_renamed += usize::from(sheet.renamed);
+        s.sheets_moved += usize::from(sheet.moved);
         for c in &sheet.changes {
             match (c.kind, c.status) {
                 (Kind::Value, _) => s.value += 1,

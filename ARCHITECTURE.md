@@ -49,6 +49,10 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
     of one sheet pair), and
     [diff/cells.rs](crates/xldif/src/diff/cells.rs) (value and formula
     changes, labels, folding);
+  - [series.rs](crates/xldif/src/series.rs): file names grouped into
+    version series by their `_YYMMDD_HHMM` stamp, what counts as an edit,
+    and the walk that decides which versions to keep (reading through a
+    closure the CLI supplies);
   - [error.rs](crates/xldif/src/error.rs): stable error categories.
 
   The [`xldif` skill](skills/xldif/SKILL.md) never reads workbooks itself:
@@ -59,7 +63,9 @@ skills/xldif ──(xldif …; JSON on stdout)──► crates/xldif-cli ──�
   place xldif starts another program
   ([excel.rs](crates/xldif-cli/src/excel.rs), with the PowerShell script
   beside it): having Excel save a copy of a workbook the reader rejects, or
-  of a workbook as Excel has it open.
+  of a workbook as Excel has it open. `series`
+  ([series.rs](crates/xldif-cli/src/series.rs)) lists folders and file sizes
+  and leaves every decision to the library.
 - [`crates/xldif-fixtures`](crates/xldif-fixtures/src/lib.rs) writes synthetic
   workbooks with `rust_xlsxwriter` for tests. No shipped crate depends on it.
 

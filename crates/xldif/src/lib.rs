@@ -16,6 +16,7 @@ pub mod model;
 pub mod numfmt;
 mod package;
 pub mod reader;
+pub mod series;
 mod sheet_objects;
 pub mod styles;
 mod textdiff;

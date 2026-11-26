@@ -1,6 +1,6 @@
 ---
 name: xldif
-description: "Compare two Excel workbooks (.xlsx, .xlsm) and explain what changed — values, formulas, formatting, inserted/deleted/moved rows and columns, renamed sheets, comments, validation, conditional formatting, defined names — using the xldif CLI, and hand people a side-by-side HTML report. Use when a task asks what changed between two versions of a spreadsheet (a workpaper, a schedule, a model, a client export), to review a revised workbook, or to check a formula or figure across versions. Not for editing workbooks, recalculating formulas, .xls/.xlsb files, CSV diffs, or Google Sheets."
+description: "Compare two Excel workbooks (.xlsx, .xlsm) and explain what changed — values, formulas, formatting, inserted/deleted/moved rows and columns, renamed sheets, comments, validation, conditional formatting, defined names — using the xldif CLI, and hand people a side-by-side HTML report. Use when a task asks what changed between two versions of a spreadsheet (a workpaper, a schedule, a model, a client export), to review a revised workbook, to check a formula or figure across versions, or to decide which of many timestamped saves in a folder are worth keeping. Not for editing workbooks, recalculating formulas, .xls/.xlsb files, CSV diffs, or Google Sheets."
 ---
 
 # xldif
@@ -48,6 +48,8 @@ it was read through a copy Excel made (`converted_by_excel`,
   --sheet NAME --range A1:F40 --format text`.
 - Only the shape of one workbook (sheets, used ranges, counts, names):
   `xldif inspect BOOK`.
+- A folder of many saved versions (`name_YYMMDD_HHMM.xlsx`), which ones are
+  worth keeping, or freeing space: read [versions](references/versions.md).
 
 ## Universal rules
 
