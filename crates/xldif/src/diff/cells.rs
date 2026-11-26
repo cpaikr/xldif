@@ -139,7 +139,7 @@ pub(super) fn sheet_changes(
     al: &Aligned,
     (this, back): (&SheetMap, &SheetMap),
     shared: &Shared,
-) -> (Vec<Change>, usize) {
+) -> (Vec<Change>, usize, usize) {
     let Shared { options, formats, .. } = shared;
     let (col_al, row_al) = (&al.cols, &al.rows);
     let mut changes = Vec::new();
@@ -184,6 +184,15 @@ pub(super) fn sheet_changes(
     let to_base: HashMap<u32, u32> = col_al.pairs.iter().chain(&col_al.moves).map(|&(b, o)| (o, b)).collect();
     let mut edits: Vec<FormulaEdit> = Vec::new();
     let mut adjusted = 0;
+    // Value changes a formula produced rather than a person typed: a cell
+    // with a formula on either side, or one inside an array formula's or
+    // data table's range, whose cells other than the anchor carry no
+    // formula of their own.
+    let mut computed = 0;
+    let (spilled_b, spilled_o) = (computed_ranges(gb), computed_ranges(go));
+    let is_computed = |cell: Option<&crate::model::Cell>, spilled: &[Range], r: u32, c: u32| {
+        cell.is_some_and(|c| c.formula.is_some()) || spilled.iter().any(|x| x.contains(r, c))
+    };
     // Moved rows get indexes far past the ordered pairs, so folding never
     // treats the last paired row and the first moved row as neighbours.
     let ordered = row_al.pairs.iter().enumerate();
@@ -251,6 +260,9 @@ pub(super) fn sheet_changes(
             if same {
                 continue;
             }
+            if is_computed(cell_b, &spilled_b, rb, cb) || is_computed(cell_o, &spilled_o, ro, co) {
+                computed += 1;
+            }
             let status = match (value_bytes(vb, 0.0), value_bytes(vo, 0.0)) {
                 (None, _) => Status::OnlyOther,
                 (_, None) => Status::OnlyBase,
@@ -277,7 +289,20 @@ pub(super) fn sheet_changes(
     }
     changes.extend(fold_formula_edits(id, edits, &labels_for));
     changes.sort_by_key(order_key);
-    (changes, adjusted)
+    (changes, adjusted, computed)
+}
+
+/// The ranges of a sheet's array formulas and data tables: cells whose
+/// values those formulas produce. A single-cell range is left out: its one
+/// cell carries the formula itself.
+fn computed_ranges(g: &Grid) -> Vec<Range> {
+    g.sheet
+        .cells()
+        .filter_map(|(_, c)| c.formula.as_ref())
+        .filter(|f| matches!(f.kind, FormulaKind::Array | FormulaKind::DataTable))
+        .filter_map(|f| f.range.as_deref().and_then(Range::parse))
+        .filter(|r| (r.first_row, r.first_col) != (r.last_row, r.last_col))
+        .collect()
 }
 
 /// Folds formula edits that are the same change filled down a column:

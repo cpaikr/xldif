@@ -17,7 +17,7 @@ pub enum Output {
     Json { result: Value, warnings: Vec<Warning> },
 }
 
-fn json<T: serde::Serialize>(value: &T) -> Value {
+pub(crate) fn json<T: serde::Serialize>(value: &T) -> Value {
     serde_json::to_value(value).expect("view types always serialize")
 }
 
@@ -129,6 +129,9 @@ pub fn run(command: Command, unsaved: bool) -> Result<Output, Failure> {
                 }
             }
         }
+        Command::Series { folder, recursive, min_edits, tolerance, format } => {
+            crate::series::run(&folder, recursive, min_edits, tolerance, format, unsaved)
+        }
         Command::Cells { book, sheet, range, limit, format } => {
             let range = range
                 .map(|r| {
@@ -230,7 +233,7 @@ fn inspect_text(i: &Inspection, warnings: &[Warning]) -> String {
     out
 }
 
-fn write_warnings(out: &mut String, warnings: &[Warning]) {
+pub(crate) fn write_warnings(out: &mut String, warnings: &[Warning]) {
     for w in warnings {
         let _ = writeln!(out, "warning\t{}\t{}", w.code, escape(&w.message));
     }
@@ -240,7 +243,7 @@ fn write_warnings(out: &mut String, warnings: &[Warning]) {
 /// terminal: backslashes, tabs, and line breaks are escaped so they cannot
 /// split or blur a line, and every other control character (such as ESC,
 /// which could start a terminal escape sequence) is shown as `\u{..}`.
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {

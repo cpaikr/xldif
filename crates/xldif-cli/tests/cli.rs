@@ -543,3 +543,97 @@ fn a_malformed_formula_does_not_break_the_contract() {
     let env = ok(&run, "compare");
     assert_eq!(env["result"]["summary"]["formula"], 1);
 }
+
+/// A one-sheet book: a rate and the revenue it drives, plus a note.
+fn version_book(rate: f64, note: &str) -> Vec<u8> {
+    let revenue = format!("{}", 1000.0 * (1.0 + rate));
+    let grid: &[&[&str]] = &[
+        &["Growth", &rate.to_string()],
+        &["Base revenue", "1000"],
+        &["Revenue", &format!("=B2*(1+B1)|{revenue}")],
+        &["Note", note],
+    ];
+    xldif_fixtures::grid_book(&[("DCF", grid)])
+}
+
+#[test]
+fn series_keeps_versions_with_enough_edits_since_the_last_kept() {
+    let work = Work::new();
+    work.file("DCF_261120_1637.xlsx", &version_book(0.1, "draft"));
+    work.file("DCF_261120_1649.xlsx", &version_book(0.1, "draft 2"));
+    work.file("DCF_261121_0900_review.xlsx", &version_book(0.2, "reviewed"));
+    work.file("DCF_261122_1000.xlsx", &version_book(0.2, "final"));
+    work.file("~$DCF_261122_1000.xlsx", b"owner");
+    work.file("template.xlsx", &version_book(0.1, "x"));
+    work.file("broken_261121_0800.xlsx", b"not a workbook");
+    work.file("notes.txt", b"ignored");
+    std::fs::create_dir(work.0.join("sub")).unwrap();
+    work.file("sub/FS_261123_1112.xlsx", &version_book(0.1, "fs"));
+
+    let r = &ok(&xldif(["series", s(&work.0), "--min-edits", "2"]), "series")["result"];
+    let series = r["series"].as_array().unwrap();
+    assert_eq!(series.len(), 2, "the subfolder is not read without --recursive");
+    let dcf = &series[0];
+    assert_eq!((dcf["name"].as_str(), dcf["folder"].as_str()), (Some("DCF"), Some("")));
+    let verdicts: Vec<(&str, bool, Option<&str>, Option<u64>)> = dcf["versions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| {
+            (
+                v["reason"].as_str().unwrap(),
+                v["keep"].as_bool().unwrap(),
+                v["comparedWith"].as_str(),
+                v["edits"].as_u64(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            ("first", true, None, None),
+            ("fewEdits", false, Some("DCF_261120_1637.xlsx"), Some(1)),
+            // The rate and the note: two edits; the revenue only recalculated.
+            ("edited", true, Some("DCF_261120_1637.xlsx"), Some(2)),
+            ("latest", true, Some("DCF_261121_0900_review.xlsx"), Some(1)),
+        ]
+    );
+    let reviewed = &dcf["versions"][2]["summary"];
+    assert_eq!((reviewed["valueInput"].as_u64(), reviewed["valueComputed"].as_u64()), (Some(2), Some(1)));
+    let removed = dcf["versions"][1]["bytes"].as_u64().unwrap();
+    assert_eq!((dcf["removable"].as_u64(), dcf["removableBytes"].as_u64()), (Some(1), Some(removed)));
+
+    // A version that cannot be read is kept, with its error.
+    let broken = &series[1]["versions"][0];
+    assert_eq!((broken["reason"].as_str(), broken["keep"].as_bool()), (Some("unreadable"), Some(true)));
+    assert_eq!(broken["error"]["code"], "invalid_archive");
+
+    let skipped: Vec<(&str, &str)> = r["skipped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| (s["file"].as_str().unwrap(), s["reason"].as_str().unwrap()))
+        .collect();
+    assert_eq!(skipped, [("template.xlsx", "noStamp"), ("~$DCF_261122_1000.xlsx", "lockFile")]);
+    assert_eq!(r["totals"]["removable"], 1);
+
+    let recursive = &ok(&xldif(["series", s(&work.0), "--recursive"]), "series")["result"];
+    let folders: Vec<&str> =
+        recursive["series"].as_array().unwrap().iter().map(|s| s["folder"].as_str().unwrap()).collect();
+    assert_eq!(folders, ["", "", "sub"]);
+
+    let text = xldif(["series", s(&work.0), "--min-edits", "2", "--format", "text"]);
+    assert_eq!(text.code, 0);
+    assert!(text.stdout.contains("keep 4, remove 1"), "{}", text.stdout);
+    assert!(text.stdout.contains("261120_1649\tremove\tfewEdits\t1\t1\t0\t0\t0\t"), "{}", text.stdout);
+    assert!(text.stdout.contains("skipped\tlockFile\t~$DCF_261122_1000.xlsx"), "{}", text.stdout);
+}
+
+#[test]
+fn series_rejects_a_file_or_a_missing_folder() {
+    let work = Work::new();
+    let book = work.basic();
+    failure(&xldif(["series", s(&book)]), "invalid_argument");
+    failure(&xldif(["series", s(&work.0.join("missing"))]), "file_not_found");
+    failure(&xldif(["series", s(&work.0), "--tolerance=-1"]), "invalid_argument");
+}

@@ -41,6 +41,16 @@ CLI. See [PLAN.md](PLAN.md).
   text the cell shows when its number format changes it (`display`), and
   date-formatted numbers as ISO dates (`date`). Value changes in `compare`
   carry the same two fields.
+- `xldif series FOLDER [--recursive] [--min-edits N]` sorts saved versions
+  (`.xlsx`/`.xlsm` names that differ only by a `_YYMMDD_HHMM` stamp) into
+  series and suggests which to keep: the first, the newest, unreadable ones,
+  and each version with at least `N` edits (default 200) since the last one
+  kept. Edits are what a person changed: typed values, formulas, and rows,
+  columns, and sheets added, removed, moved, or renamed; values that formulas
+  recalculated are counted apart (`valueComputed`) and do not count. It
+  reports each version's counts and size and the space the rest take; it
+  deletes nothing. `compare`'s summary carries the same split
+  (`valueInput`, `valueComputed`).
 
 All accept `--format text`. Run `xldif <command> --help` for details.
 
