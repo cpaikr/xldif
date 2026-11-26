@@ -117,3 +117,13 @@ fn the_newest_readable_version_is_kept_when_a_newer_one_is_broken() {
     let books = vec![Some(v1()), Some(rate_changed()), None];
     assert_eq!(verdicts(books, 5), [(Reason::First, None), (Reason::Latest, Some(0)), (Reason::Unreadable, None)]);
 }
+
+#[test]
+fn reordering_sheets_is_an_edit() {
+    let (a, b): (Grid, Grid) = (&[&["Assets", "1"]], &[&["Income", "2"]]);
+    let before = read_bytes(grid_book(&[("BS", a), ("PL", b)])).unwrap();
+    let after = read_bytes(grid_book(&[("PL", b), ("BS", a)])).unwrap();
+    let s = compare("a", &before, "b", &after, CompareOptions::default()).summary;
+    assert_eq!(s.sheets_moved, 1);
+    assert_eq!(edits(&s), 1);
+}

@@ -458,6 +458,8 @@ pub struct Summary {
     pub sheets_only_base: usize,
     pub sheets_only_other: usize,
     pub sheets_renamed: usize,
+    /// Paired sheets whose position among the paired sheets changed.
+    pub sheets_moved: usize,
     pub rows_only_base: usize,
     pub rows_only_other: usize,
     pub rows_moved: usize,
@@ -747,6 +749,7 @@ fn summarize(sheets: &[SheetComparison]) -> Summary {
             Status::Same | Status::Moved => {}
         }
         s.sheets_renamed += usize::from(sheet.renamed);
+        s.sheets_moved += usize::from(sheet.moved);
         for c in &sheet.changes {
             match (c.kind, c.status) {
                 (Kind::Value, _) => s.value += 1,

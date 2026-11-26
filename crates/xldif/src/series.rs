@@ -142,6 +142,7 @@ pub const fn edits(s: &Summary) -> usize {
         + s.sheets_only_base
         + s.sheets_only_other
         + s.sheets_renamed
+        + s.sheets_moved
 }
 
 /// Why a version is kept or not.

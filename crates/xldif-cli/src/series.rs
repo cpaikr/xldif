@@ -274,9 +274,14 @@ fn folders(root: &Path, recursive: bool, unlisted: &mut Vec<String>) -> Result<V
     Ok(out)
 }
 
-/// The names of the regular files in `dir`.
+/// The names of the regular files in `dir`. A link to a workbook is left
+/// out: removing it frees nothing, and its target is judged where it lives.
 fn file_names(dir: &Path) -> Result<Vec<String>, Failure> {
-    Ok(entries(dir)?.into_iter().filter(|(_, path)| path.is_file()).map(|(name, _)| name).collect())
+    Ok(entries(dir)?
+        .into_iter()
+        .filter(|(_, path)| std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()))
+        .map(|(name, _)| name)
+        .collect())
 }
 
 /// `(name, path)` for each entry with a Unicode name; other names cannot
@@ -344,7 +349,8 @@ fn text(r: &Report, warnings: &[Warning]) -> String {
                         + m.columns_moved
                         + m.sheets_only_base
                         + m.sheets_only_other
-                        + m.sheets_renamed;
+                        + m.sheets_renamed
+                        + m.sheets_moved;
                     format!(
                         "{}\t{}\t{}\t{lines}\t{}\t{}\t{}",
                         series::edits(m),
